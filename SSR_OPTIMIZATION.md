@@ -1,5 +1,9 @@
 # Experimental SSR optimization fork
 
+See [What changed](OPTIMIZATION_CHANGES.md) for the September 24 follow-up,
+restored integration compatibility, and the latest measurements. The benchmark
+figures below describe the earlier September 22 implementation.
+
 This branch is based on upstream `619637063c888ca958629074359759a4487ca6a0`.
 The framework implementation commit is `7a337e1d`: **42 files changed, 3,219
 insertions and 367 deletions**, including regression tests. This note is a
@@ -16,9 +20,10 @@ feature combination or downstream application is unaffected.
 
 There are real compatibility and behavior costs:
 
-- Custom server integrations must change stream-builder callbacks to return
-  `leptos_integration_utils::Rendered`. Use `Rendered::streaming` unless the
-  whole HTML rendering stream has completed. Axum and Actix were migrated.
+- The September 24 follow-up restores the original custom integration callback
+  signatures. Completion-aware integrations can opt into `from_app_rendered`
+  and `build_response_rendered`; Axum and Actix use these variants. Use
+  `Rendered::streaming` unless the whole HTML stream has completed.
 - The new `Suspend::from_fn` retains preparation within a request/view. Read
   its documented resource-discovery and capture semantics; it is not a
   universal replacement for every existing async expression. Existing APIs
@@ -66,8 +71,8 @@ awaits for unshared data, borrowed immutable catalog strings with owned dynamic
 values still supported, new rendering APIs, typed pagination branches, and
 optional unused bootstrap omission. These gains are not all transparent speedups
 for unchanged applications. No rendered output or request-dependent resource
-result is cached across requests. The framework fork does not include the
-separate benchmark application migration or the local benchmark harness.
+result is cached across requests. The benchmark application migration is now included in
+`performance/storefront-migration.patch`; the local benchmark harness is not included.
 
 Both frameworks used Rust 1.98.0 MSVC, mimalloc, fat LTO, one codegen unit,
 native CPU targeting and PGO trained on the same 185 URLs, on a Ryzen 9800X3D.

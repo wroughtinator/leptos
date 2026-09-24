@@ -1,0 +1,266 @@
+{
+  "date": "2026-09-24",
+  "upstream_base": "619637063c888ca958629074359759a4487ca6a0",
+  "framework_commit": "a5d455fe1982eee3754cd591863447b8e593b657",
+  "source_files_sha256": {
+    "hydration_context/src/ssr.rs": "d928a9886dce70eb7ea555e90de4715194dbce35f38ac5e5adab3ed206e32aab",
+    "integrations/actix/src/lib.rs": "216e1072e12a1ec9082743fcc8dbf88543393ad23389698856d8d432859e06df",
+    "integrations/axum/src/lib.rs": "e79e65e8da6c214fa3a21a8b53c38b21876e933628d68718e60657625019c683",
+    "integrations/utils/src/lib.rs": "bfe99d9ddc1e377ac50a194725b1575a5f392a2fb1c8c07dcde9a204db81dcee",
+    "leptos/src/nonce.rs": "5fb2aba0e979eeba80b7eb298d043d70eb92d2c6f1860752585ac068ca2fd7d5",
+    "reactive_graph/src/owner.rs": "8c3e7a1e4f90d6e7c09037e7e0df0314ca0b914372a1bbaba8892fbb842eb2ea",
+    "reactive_graph/src/owner/context.rs": "3c97b9b76b906fcd54b28ce8f03bf805c66a1c5ff304702650a7ac8a12b34051"
+  },
+  "compiler_and_host": {
+    "seconds": 15,
+    "latency_seconds": 3,
+    "runs": 3,
+    "threads": 0,
+    "name": "compatible-paired",
+    "frameworks": [
+      "topcoat",
+      "leptos"
+    ],
+    "routes": [
+      "home",
+      "products",
+      "product"
+    ],
+    "reference": "baseline",
+    "output_name": "storefront-leptos",
+    "leptos_dir": "experiments/leptos-pgo",
+    "topcoat_dir": "experiments/topcoat-pgo",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "connections": 32,
+    "rate": 200,
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "topcoat": "f26ca9fcdc120efd7f6bd40693eaaa36c00b70ba",
+    "leptos_clone": "d20805da5a2047e8c2eef194bfc1c7b18e7ca2e0",
+    "binary_sha256": {
+      "topcoat": "1c7a2dc303c835b69ae7da377539d58574f10788bd9db5d3292a2be970b0f652",
+      "leptos": "8b46b9d222499ee30ae5be814c2820b63062a3e75900e8f1fc586eca30421068"
+    },
+    "leptos_clone_note": "The harness recorded the parent HEAD while the follow-up edits were uncommitted. framework_commit and source_files_sha256 identify the measured implementation."
+  },
+  "build": [
+    {
+      "framework": "leptos",
+      "sha256": "8b46b9d222499ee30ae5be814c2820b63062a3e75900e8f1fc586eca30421068",
+      "training_urls": 185,
+      "training_seconds": 15,
+      "training_rate": 3000,
+      "allocator": "mimalloc",
+      "profile": "fat LTO, 1 codegen unit, native CPU, PGO"
+    }
+  ],
+  "route_samples": [
+    {
+      "framework": "topcoat",
+      "route": "home",
+      "rps": 142237.98419703692,
+      "p50_ms": 0.1538,
+      "p99_ms": 0.5297999999999999,
+      "bytes": 38977,
+      "rps_runs": [
+        142237.98419703692,
+        141410.10301376475,
+        142708.22947164235
+      ]
+    },
+    {
+      "framework": "topcoat",
+      "route": "products",
+      "rps": 97703.98810900618,
+      "p50_ms": 0.2271,
+      "p99_ms": 0.6119,
+      "bytes": 79069,
+      "rps_runs": [
+        97167.56638264067,
+        97703.98810900618,
+        99956.8222955186
+      ]
+    },
+    {
+      "framework": "topcoat",
+      "route": "product",
+      "rps": 141273.2351143402,
+      "p50_ms": 0.1688,
+      "p99_ms": 0.5710999999999999,
+      "bytes": 43137,
+      "rps_runs": [
+        141928.55467756078,
+        141273.2351143402,
+        138758.91784673915
+      ]
+    },
+    {
+      "framework": "leptos",
+      "route": "home",
+      "rps": 139658.2643107339,
+      "p50_ms": 0.1744,
+      "p99_ms": 0.5733,
+      "bytes": 39253,
+      "rps_runs": [
+        139358.81276422876,
+        139658.2643107339,
+        141496.30835129585
+      ]
+    },
+    {
+      "framework": "leptos",
+      "route": "products",
+      "rps": 105337.15554319561,
+      "p50_ms": 0.22,
+      "p99_ms": 0.6396999999999999,
+      "bytes": 79390,
+      "rps_runs": [
+        105119.9739354581,
+        107665.80757764737,
+        105337.15554319561
+      ]
+    },
+    {
+      "framework": "leptos",
+      "route": "product",
+      "rps": 135721.28758747745,
+      "p50_ms": 0.17300000000000001,
+      "p99_ms": 0.5467,
+      "bytes": 43425,
+      "rps_runs": [
+        135721.28758747745,
+        136331.32981463207,
+        134532.11823419042
+      ]
+    }
+  ],
+  "mixed_samples": {
+    "compatible-mixed": [
+      {
+        "framework": "optimized",
+        "rps": 114933.92346952023,
+        "rps_runs": [
+          114933.92346952023,
+          110641.89476255987,
+          115210.41168872143
+        ],
+        "binary_sha256": "8b46b9d222499ee30ae5be814c2820b63062a3e75900e8f1fc586eca30421068"
+      },
+      {
+        "framework": "topcoat",
+        "rps": 111011.56296168732,
+        "rps_runs": [
+          113008.20101208337,
+          110582.96500286563,
+          111011.56296168732
+        ],
+        "binary_sha256": "1c7a2dc303c835b69ae7da377539d58574f10788bd9db5d3292a2be970b0f652"
+      }
+    ],
+    "compatible-mixed-reversed": [
+      {
+        "framework": "topcoat",
+        "rps": 111103.40493185622,
+        "rps_runs": [
+          111103.40493185622,
+          112373.46000201686,
+          109359.53295498191
+        ],
+        "binary_sha256": "1c7a2dc303c835b69ae7da377539d58574f10788bd9db5d3292a2be970b0f652"
+      },
+      {
+        "framework": "optimized",
+        "rps": 113492.69495239352,
+        "rps_runs": [
+          112180.24628406849,
+          113492.69495239352,
+          114557.2560554623
+        ],
+        "binary_sha256": "8b46b9d222499ee30ae5be814c2820b63062a3e75900e8f1fc586eca30421068"
+      }
+    ]
+  },
+  "parity": {
+    "distinct_urls": 185,
+    "repeated_requests": 3,
+    "comparison": "complete response bytes after replacing the fresh CSP nonce and the declared unused islands bootstrap with its empty-view marker",
+    "removed_bootstrap_sha256": "4605f6d5afa8af9b47f45b6b30201964be5204470d91b093c1a9075f3c9deab1",
+    "pristine_equals_optimized": true,
+    "topcoat_visible_text_matches_all_urls": true
+  },
+  "allocation_counts": [
+    {
+      "allocated_bytes": 76559,
+      "allocations": 205,
+      "html_bytes": 39253,
+      "mean_ns": 29536,
+      "reallocations": 22,
+      "route": "/",
+      "samples": 100
+    },
+    {
+      "allocated_bytes": 141938,
+      "allocations": 330,
+      "html_bytes": 79390,
+      "mean_ns": 59035,
+      "reallocations": 107,
+      "route": "/products?page=3&sort=price",
+      "samples": 100
+    },
+    {
+      "allocated_bytes": 85097,
+      "allocations": 235,
+      "html_bytes": 43425,
+      "mean_ns": 31752,
+      "reallocations": 23,
+      "route": "/products/42",
+      "samples": 100
+    }
+  ],
+  "validation": {
+    "graph_regular_serial": {
+      "passed": 126,
+      "ignored_upstream": 1
+    },
+    "graph_sandboxed_serial": {
+      "passed": 126,
+      "ignored_upstream": 1
+    },
+    "leptos_ssr_nonce": {
+      "passed": 27
+    },
+    "integration_utils": {
+      "passed": 7
+    },
+    "hydration_context": {
+      "passed": 4
+    },
+    "axum_actix_check": "passed",
+    "wasm_check": "passed",
+    "parallel_immediate_effects": "failed in both fork and pristine control; serial suites pass",
+    "browser": {
+      "fixture": "experiments/browser-check",
+      "ssr_hydration": true,
+      "resource_updates": [
+        0,
+        1,
+        2,
+        4,
+        0
+      ],
+      "error_boundary_at_count": 3,
+      "error_recovers_at_count": 4,
+      "list_grows_to_five_items_then_shrinks_to_one": true,
+      "erased_branch_replacement": true,
+      "title_sequence": [
+        "Visible 0",
+        "Visible 1",
+        "Count 1",
+        "Visible 1"
+      ],
+      "anchored_title_and_async_content_remount": true,
+      "console_warnings_and_errors": []
+    }
+  },
+  "note": "Allocation instrumentation is separate from HTTP throughput. Instrumented timings are not used for performance claims. The app migration is published alongside this record; the local harness is not included."
+}

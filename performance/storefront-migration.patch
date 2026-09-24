@@ -1,0 +1,465 @@
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -18,7 +18,7 @@
+                 <meta charset="utf-8"/>
+                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+                 <AutoReload options=options.clone()/>
+-                <HydrationScripts options islands=true/>
++                <HydrationScripts options islands=true when_needed=true/>
+                 <MetaTags/>
+             </head>
+             <body class="flex min-h-screen flex-col bg-slate-50 text-slate-900">
+--- a/src/catalog.rs
++++ b/src/catalog.rs
+@@ -1,7 +1,7 @@
+ //! Server-only product catalog, loaded once from the shared
+ //! `benchmarks/data/products.json`.
+ 
+-use std::{collections::HashMap, sync::LazyLock};
++use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+ 
+ use serde::Deserialize;
+ 
+@@ -35,23 +35,23 @@
+ }
+ 
+ impl Product {
+-    pub fn summary(&self) -> ProductSummary {
++    pub fn summary(&'static self) -> ProductSummary {
+         ProductSummary {
+             id: self.id,
+-            name: self.name.clone(),
+-            category: self.category.clone(),
++            name: Cow::Borrowed(self.name.as_str()),
++            category: Cow::Borrowed(self.category.as_str()),
+             price_cents: self.price_cents,
+             rating_tenths: self.rating_tenths,
+             review_count: self.review_count,
+         }
+     }
+ 
+-    pub fn detail(&self, catalog: &Catalog) -> ProductDetailData {
++    pub fn detail(&'static self, catalog: &'static Catalog) -> ProductDetailData {
+         ProductDetailData {
+             id: self.id,
+-            name: self.name.clone(),
+-            category: self.category.clone(),
+-            category_slug: self.category_slug.clone(),
++            name: Cow::Borrowed(self.name.as_str()),
++            category: Cow::Borrowed(self.category.as_str()),
++            category_slug: Cow::Borrowed(self.category_slug.as_str()),
+             price_cents: self.price_cents,
+             rating_tenths: self.rating_tenths,
+             review_count: self.review_count,
+@@ -59,20 +59,20 @@
+                 .specs
+                 .iter()
+                 .map(|spec| SpecData {
+-                    key: spec.key.clone(),
+-                    value: spec.value.clone(),
++                    key: Cow::Borrowed(spec.key.as_str()),
++                    value: Cow::Borrowed(spec.value.as_str()),
+                 })
+                 .collect(),
+-            description: self.description.clone(),
++            description: self.description.iter().map(|text| Cow::Borrowed(text.as_str())).collect(),
+             reviews: self
+                 .reviews
+                 .iter()
+                 .map(|review| ReviewData {
+-                    author: review.author.clone(),
+-                    date: review.date.clone(),
++                    author: Cow::Borrowed(review.author.as_str()),
++                    date: Cow::Borrowed(review.date.as_str()),
+                     rating_tenths: review.rating_tenths,
+-                    title: review.title.clone(),
+-                    body: review.body.clone(),
++                    title: Cow::Borrowed(review.title.as_str()),
++                    body: Cow::Borrowed(review.body.as_str()),
+                 })
+                 .collect(),
+             related: self
+@@ -130,32 +130,32 @@
+         }
+     }
+ 
+-    pub fn categories(&self) -> Vec<CategoryData> {
++    pub fn categories(&'static self) -> Vec<CategoryData> {
+         self.categories
+             .iter()
+             .map(|category| CategoryData {
+-                name: category.name.clone(),
+-                slug: category.slug.clone(),
++                name: Cow::Borrowed(category.name.as_str()),
++                slug: Cow::Borrowed(category.slug.as_str()),
+             })
+             .collect()
+     }
+ 
+-    pub fn get(&self, id: u32) -> Option<&Product> {
++    pub fn get(&'static self, id: u32) -> Option<&'static Product> {
+         self.by_id.get(&id).map(|&index| &self.products[index])
+     }
+ 
+-    pub fn featured(&self) -> impl Iterator<Item = &Product> {
++    pub fn featured(&'static self) -> impl Iterator<Item = &'static Product> {
+         self.products.iter().filter(|product| product.featured)
+     }
+ 
+     /// One page of the (filtered, sorted) product list; same semantics as the
+     /// other benchmark apps (see `benchmarks/topcoat/src/catalog.rs`).
+     pub fn page(
+-        &self,
++        &'static self,
+         page: usize,
+         sort: Option<&str>,
+         category: Option<&str>,
+-    ) -> ProductsPage<'_> {
++    ) -> ProductsPage<'static> {
+         let mut items: Vec<&Product> = self
+             .products
+             .iter()
+--- a/src/components.rs
++++ b/src/components.rs
+@@ -120,13 +120,13 @@
+                             viewBox="0 0 20 20"
+                             fill="currentColor"
+                             aria-hidden="true"
+-                            class=format!("{size} {color}")
++                            class=[size, color]
+                         >
+                             <path d=STAR_PATH/>
+                         </svg>
+                     }
+                 })
+-                .collect_view()}
++                .collect_view_inline::<5>()}
+         </div>
+     }
+ }
+@@ -145,7 +145,7 @@
+ 
+     view! {
+         <a
+-            href=format!("/products/{id}")
++            href=format_view!("/products/{id}")
+             class="group flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:shadow-md"
+         >
+             <div class="mb-4 flex h-32 items-center justify-center rounded-lg bg-slate-100 text-3xl font-bold text-slate-300">
+@@ -158,7 +158,7 @@
+             <div class="mt-2 flex items-center gap-1">
+                 <RatingStars tenths=rating_tenths size="h-4 w-4"/>
+                 <span class="text-xs text-slate-500">
+-                    {format!("{} ({review_count})", format_rating(rating_tenths))}
++                    {format_view!("{} ({review_count})", format_rating(rating_tenths))}
+                 </span>
+             </div>
+             <p class="mt-3 text-lg font-bold">{format_price(price_cents)}</p>
+@@ -179,51 +179,47 @@
+             class="mt-10 flex flex-wrap items-center justify-center gap-1 text-sm"
+         >
+             {if current > 1 {
+-                view! {
++                leptos::either::Either::Left(view! {
+                     <a href=products_url(current - 1, sort.as_deref(), category.as_deref()) class=PAGE_LINK>
+                         "Previous"
+                     </a>
+-                }
+-                    .into_any()
++                })
+             } else {
+-                view! { <span class=PAGE_DISABLED>"Previous"</span> }.into_any()
++                leptos::either::Either::Right(view! { <span class=PAGE_DISABLED>"Previous"</span> })
+             }}
+             {(1..=page_count)
+                 .map(|number| {
+                     if number == current {
+-                        view! {
++                        leptos::either::Either::Left(view! {
+                             <span aria-current="page" class=PAGE_CURRENT>{number}</span>
+-                        }
+-                            .into_any()
++                        })
+                     } else {
+-                        view! {
++                        leptos::either::Either::Right(view! {
+                             <a
+                                 href=products_url(number, sort.as_deref(), category.as_deref())
+                                 class=PAGE_LINK
+                             >
+                                 {number}
+                             </a>
+-                        }
+-                            .into_any()
++                        })
+                     }
+                 })
+                 .collect_view()}
+             {if current < page_count {
+-                view! {
++                leptos::either::Either::Left(view! {
+                     <a href=products_url(current + 1, sort.as_deref(), category.as_deref()) class=PAGE_LINK>
+                         "Next"
+                     </a>
+-                }
+-                    .into_any()
++                })
+             } else {
+-                view! { <span class=PAGE_DISABLED>"Next"</span> }.into_any()
++                leptos::either::Either::Right(view! { <span class=PAGE_DISABLED>"Next"</span> })
+             }}
+         </nav>
+     }
+ }
+ 
+ #[component]
+-pub fn BreadcrumbsNav(category: String, category_slug: String, name: String) -> impl IntoView {
++pub fn BreadcrumbsNav(category: std::borrow::Cow<'static, str>, category_slug: std::borrow::Cow<'static, str>, name: std::borrow::Cow<'static, str>) -> impl IntoView {
+     view! {
+         <nav aria-label="Breadcrumb" class="text-sm text-slate-500">
+             <ol class="flex flex-wrap items-center gap-2">
+@@ -236,7 +232,7 @@
+                 </li>
+                 <li>"/"</li>
+                 <li>
+-                    <a href=format!("/products?category={category_slug}") class="hover:text-slate-900">
++                    <a href=format_view!("/products?category={category_slug}") class="hover:text-slate-900">
+                         {category}
+                     </a>
+                 </li>
+--- a/src/format.rs
++++ b/src/format.rs
+@@ -3,13 +3,13 @@
+ 
+ /// Price formatted as `$12.99`; plain integer math so every benchmark app
+ /// formats identically.
+-pub fn format_price(cents: u32) -> String {
+-    format!("${}.{:02}", cents / 100, cents % 100)
++pub fn format_price(cents: u32) -> leptos::prelude::DisplayView<impl std::fmt::Display + Clone + Send> {
++    leptos::prelude::format_view!("${}.{:02}", cents / 100, cents % 100)
+ }
+ 
+ /// A rating in tenths formatted as `4.3`.
+-pub fn format_rating(tenths: u32) -> String {
+-    format!("{}.{}", tenths / 10, tenths % 10)
++pub fn format_rating(tenths: u32) -> leptos::prelude::DisplayView<impl std::fmt::Display + Clone + Send> {
++    leptos::prelude::format_view!("{}.{}", tenths / 10, tenths % 10)
+ }
+ 
+ /// Number of filled stars out of five for a rating in tenths, rounded half-up.
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -4,18 +4,19 @@
+ //! these values are not embedded in the document.
+ 
+ use serde::{Deserialize, Serialize};
++use std::borrow::Cow;
+ 
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct CategoryData {
+-    pub name: String,
+-    pub slug: String,
++    pub name: Cow<'static, str>,
++    pub slug: Cow<'static, str>,
+ }
+ 
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct ProductSummary {
+     pub id: u32,
+-    pub name: String,
+-    pub category: String,
++    pub name: Cow<'static, str>,
++    pub category: Cow<'static, str>,
+     pub price_cents: u32,
+     pub rating_tenths: u32,
+     pub review_count: u32,
+@@ -23,17 +24,17 @@
+ 
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct SpecData {
+-    pub key: String,
+-    pub value: String,
++    pub key: Cow<'static, str>,
++    pub value: Cow<'static, str>,
+ }
+ 
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct ReviewData {
+-    pub author: String,
+-    pub date: String,
++    pub author: Cow<'static, str>,
++    pub date: Cow<'static, str>,
+     pub rating_tenths: u32,
+-    pub title: String,
+-    pub body: String,
++    pub title: Cow<'static, str>,
++    pub body: Cow<'static, str>,
+ }
+ 
+ #[derive(Clone, Serialize, Deserialize)]
+@@ -57,14 +58,31 @@
+ #[derive(Clone, Serialize, Deserialize)]
+ pub struct ProductDetailData {
+     pub id: u32,
+-    pub name: String,
+-    pub category: String,
+-    pub category_slug: String,
++    pub name: Cow<'static, str>,
++    pub category: Cow<'static, str>,
++    pub category_slug: Cow<'static, str>,
+     pub price_cents: u32,
+     pub rating_tenths: u32,
+     pub review_count: u32,
+     pub specs: Vec<SpecData>,
+-    pub description: Vec<String>,
++    pub description: Vec<Cow<'static, str>>,
+     pub reviews: Vec<ReviewData>,
+     pub related: Vec<ProductSummary>,
+ }
++
++#[cfg(all(test, feature = "ssr"))]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn fresh_transport_data_remains_owned_and_round_trips() {
++        for name in ["fresh item < & 雪", "another request's item"] {
++            let wire = serde_json::json!({"id": 700, "name": name, "category": "new category",
++                "price_cents": 12345, "rating_tenths": 47, "review_count": 8});
++            let decoded: ProductSummary = serde_json::from_value(wire.clone()).unwrap();
++            assert!(matches!(&decoded.name, Cow::Owned(_)));
++            assert_eq!(decoded.name, name);
++            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
++        }
++    }
++}
+--- a/src/pages/home.rs
++++ b/src/pages/home.rs
+@@ -4,12 +4,10 @@
+ 
+ #[component]
+ pub fn HomePage() -> impl IntoView {
+-    let data = Resource::new(|| (), |()| get_home());
+-
+     view! {
+         <Suspense fallback=|| ()>
+-            {move || Suspend::new(async move {
+-                data.await.ok().map(|data| {
++            {Suspend::from_fn(move || async move {
++                get_home().await.ok().map(|data| {
+                     view! {
+                         <section class="rounded-2xl bg-indigo-600 px-8 py-16 text-white">
+                             <h1 class="max-w-2xl text-4xl font-bold tracking-tight">
+--- a/src/pages/product_detail.rs
++++ b/src/pages/product_detail.rs
+@@ -11,20 +11,14 @@
+ #[component]
+ pub fn ProductDetailPage() -> impl IntoView {
+     let params = use_params_map();
+-    let data = Resource::new(
+-        move || params.get().get("id").and_then(|id| id.parse::<u32>().ok()),
+-        |id| async move {
+-            match id {
+-                Some(id) => get_product(id).await,
+-                None => Ok(None),
+-            }
+-        },
+-    );
+ 
+     view! {
+         <Suspense fallback=|| ()>
+-            {move || Suspend::new(async move {
+-                data.await.ok().flatten().map(product_view)
++            {Suspend::from_fn(move || async move {
++                match params.get().get("id").and_then(|id| id.parse::<u32>().ok()) {
++                    Some(id) => get_product(id).await.ok().flatten().map(product_view),
++                    None => None,
++                }
+             })}
+         </Suspense>
+     }
+@@ -58,7 +52,7 @@
+                 <div class="mt-3 flex items-center gap-2">
+                     <RatingStars tenths=rating_tenths size="h-5 w-5"/>
+                     <span class="text-sm text-slate-500">
+-                        {format!("{} ({review_count} reviews)", format_rating(rating_tenths))}
++                        {format_view!("{} ({review_count} reviews)", format_rating(rating_tenths))}
+                     </span>
+                 </div>
+                 <p class="mt-6 text-4xl font-bold">{format_price(price_cents)}</p>
+@@ -81,7 +75,7 @@
+             <SpecTable specs/>
+         </section>
+         <section class="mt-16">
+-            <h2 class="text-2xl font-bold tracking-tight">{format!("Reviews ({review_count})")}</h2>
++            <h2 class="text-2xl font-bold tracking-tight">{format_view!("Reviews ({review_count})")}</h2>
+             <ReviewList reviews/>
+         </section>
+         <section class="mt-16">
+--- a/src/pages/products.rs
++++ b/src/pages/products.rs
+@@ -23,8 +23,9 @@
+ #[component]
+ pub fn ProductsPage() -> impl IntoView {
+     let query = use_query_map();
+-    let data = Resource::new(
+-        move || {
++    view! {
++        <Suspense fallback=|| ()>
++            {Suspend::from_fn(move || async move {
+             let query = query.get();
+             let page = query
+                 .get("page")
+@@ -32,14 +33,8 @@
+                 .unwrap_or(1);
+             let sort = normalize_sort(query.get("sort").as_deref()).map(str::to_owned);
+             let category = query.get("category");
+-            (page, sort, category)
+-        },
+-        |(page, sort, category)| get_products(page, sort, category),
+-    );
+-
+-    view! {
+-        <Suspense fallback=|| ()>
+-            {move || Suspend::new(async move { data.await.ok().map(products_view) })}
++            get_products(page, sort, category).await.ok().map(products_view)
++            })}
+         </Suspense>
+     }
+ }
+@@ -58,7 +53,7 @@
+     view! {
+         <div class="flex flex-wrap items-baseline justify-between gap-4">
+             <h1 class="text-3xl font-bold tracking-tight">"All products"</h1>
+-            <p class="text-sm text-slate-500">{format!("{total} products")}</p>
++            <p class="text-sm text-slate-500">{format_view!("{total} products")}</p>
+         </div>
+         <div class="mt-6 flex flex-wrap items-center gap-2 text-sm">
+             <span class="font-medium text-slate-500">"Sort:"</span>
+@@ -90,7 +85,7 @@
+                     view! {
+                         <a
+                             href=products_url(1, sort.as_deref(), Some(&entry.slug))
+-                            class=if category.as_deref() == Some(entry.slug.as_str()) {
++                            class=if category.as_deref() == Some(entry.slug.as_ref()) {
+                                 CHIP_ACTIVE
+                             } else {
+                                 CHIP_INACTIVE
+@@ -103,7 +98,7 @@
+                 .collect_view()}
+         </div>
+         {if total == 0 {
+-            view! { <p class="mt-8 text-slate-500">"No products found."</p> }.into_any()
++            view! { <p class="mt-8 text-slate-500">"No products found."</p> }.into_any_static()
+         } else {
+             view! {
+                 <div class="mt-8 grid grid-cols-2 gap-6 md:grid-cols-3 lg:grid-cols-4">
+@@ -114,7 +109,7 @@
+                 </div>
+                 <PaginationNav current page_count sort category/>
+             }
+-                .into_any()
++                .into_any_static()
+         }}
+     }
+ }
