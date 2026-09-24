@@ -8,6 +8,8 @@ pub mod custom;
 pub mod global;
 mod key;
 pub(crate) mod maybe_next_attr_erasure_macros;
+#[doc(hidden)]
+pub mod precompiled;
 mod value;
 
 use crate::view::{Position, ToTemplate};
@@ -35,6 +37,13 @@ pub trait Attribute: NextAttribute + Send {
 
     /// An approximation of the actual length of this attribute in HTML.
     fn html_len(&self) -> usize;
+
+    /// Pre-escaped literal attributes emitted by a view compiler. These may
+    /// only be used when no additional attributes are applied to the element.
+    #[doc(hidden)]
+    fn precompiled_html(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Renders the attribute to HTML.
     ///

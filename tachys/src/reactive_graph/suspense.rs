@@ -38,7 +38,31 @@ use throw_error::ErrorHook;
 /// A suspended `Future`, which can be used in the view.
 pub struct Suspend<T> {
     pub(crate) subscriber: SuspendSubscriber,
-    pub(crate) inner: Pin<Box<dyn Future<Output = T> + Send>>,
+    pub(crate) inner: SuspendFuture<T>,
+}
+
+pub(crate) enum SuspendFuture<T> {
+    Pending(Pin<Box<dyn Future<Output = T> + Send>>),
+    Ready(Option<T>),
+}
+
+// Only the boxed future is structurally pinned. Completed values are never
+// exposed through Pin and may be moved out when their view is consumed.
+impl<T> Unpin for SuspendFuture<T> {}
+
+impl<T> Future for SuspendFuture<T> {
+    type Output = T;
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<T> {
+        match self.get_mut() {
+            Self::Pending(future) => future.as_mut().poll(cx),
+            Self::Ready(value) => std::task::Poll::Ready(
+                value.take().expect("completed view already consumed"),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +138,30 @@ impl ToAnySubscriber for SuspendSubscriber {
 }
 
 impl<T> Suspend<T> {
+    /// Creates an asynchronous reactive view from a future factory.
+    ///
+    /// On the server, the future is retained through resource discovery and
+    /// consumed when rendering: preparing a resolved asynchronous view does not
+    /// reconstruct it at every Suspense traversal. This state belongs to one
+    /// view instance, never to a global or cross-request cache. Synchronous
+    /// resource reads conservatively restart discovery so conditional reads
+    /// still see resources that finished loading between traversals.
+    ///
+    /// In the browser, the factory runs inside a reactive render effect, just
+    /// like `move || Suspend::new(factory())`, including subsequent updates.
+    pub fn from_fn<F, Fut>(mut factory: F) -> ReactiveSuspend<T>
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: IntoFuture<Output = T>,
+        Fut::IntoFuture: Send + 'static,
+        T: 'static,
+    {
+        ReactiveSuspend {
+            factory: Box::new(move || Suspend::new(factory())),
+            prepared: None,
+        }
+    }
+
     /// Creates a new suspended view.
     pub fn new<Fut>(fut: Fut) -> Self
     where
@@ -124,7 +172,117 @@ impl<T> Suspend<T> {
         let any_subscriber = subscriber.to_any_subscriber();
         let inner = any_subscriber
             .with_observer(|| Box::pin(ScopedFuture::new(fut.into_future())));
-        Self { subscriber, inner }
+        Self {
+            subscriber,
+            inner: SuspendFuture::Pending(inner),
+        }
+    }
+}
+
+/// A future factory with reactive browser updates and retained server preparation.
+///
+/// Construct with [`Suspend::from_fn`]. Await resources inside the future to
+/// take advantage of retained preparation; synchronous resource discovery keeps
+/// the existing conservative behavior.
+pub struct ReactiveSuspend<T> {
+    factory: Box<dyn FnMut() -> Suspend<T> + Send>,
+    prepared: Option<Suspend<T>>,
+}
+
+impl<T> ReactiveSuspend<T> {
+    fn take_view(&mut self) -> Suspend<T> {
+        self.prepared.take().unwrap_or_else(|| (self.factory)())
+    }
+}
+
+impl<T: RenderHtml + 'static> Render for ReactiveSuspend<T> {
+    type State = super::RenderEffectState<SuspendState<T>>;
+
+    fn build(self) -> Self::State {
+        self.factory.build()
+    }
+
+    fn rebuild(self, state: &mut Self::State) {
+        self.factory.rebuild(state);
+    }
+}
+
+impl<T: RenderHtml + 'static> AddAnyAttr for ReactiveSuspend<T> {
+    type Output<A: Attribute> =
+        <Box<dyn FnMut() -> Suspend<T> + Send> as AddAnyAttr>::Output<A>;
+
+    fn add_any_attr<A: Attribute>(self, attr: A) -> Self::Output<A>
+    where
+        Self::Output<A>: RenderHtml,
+    {
+        self.factory.add_any_attr(attr)
+    }
+}
+
+impl<T: RenderHtml + 'static> RenderHtml for ReactiveSuspend<T> {
+    type AsyncOutput = Option<T>;
+    type Owned = Self;
+    const MIN_LENGTH: usize = T::MIN_LENGTH;
+
+    fn dry_resolve(&mut self) {
+        use reactive_graph::computed::suspense::synchronous_read_epoch;
+        let before = synchronous_read_epoch();
+        self.prepared
+            .get_or_insert_with(|| (self.factory)())
+            .dry_resolve();
+        if synchronous_read_epoch() != before {
+            self.prepared = None;
+        }
+    }
+
+    async fn resolve(mut self) -> Self::AsyncOutput {
+        self.take_view().resolve().await
+    }
+
+    fn to_html_with_buf(
+        mut self,
+        buf: &mut String,
+        position: &mut Position,
+        escape: bool,
+        mark_branches: bool,
+        extra: Vec<AnyAttribute>,
+    ) {
+        self.take_view().to_html_with_buf(
+            buf,
+            position,
+            escape,
+            mark_branches,
+            extra,
+        );
+    }
+
+    fn to_html_async_with_buf<const OUT_OF_ORDER: bool>(
+        mut self,
+        buf: &mut StreamBuilder,
+        position: &mut Position,
+        escape: bool,
+        mark_branches: bool,
+        extra: Vec<AnyAttribute>,
+    ) {
+        self.take_view().to_html_async_with_buf::<OUT_OF_ORDER>(
+            buf,
+            position,
+            escape,
+            mark_branches,
+            extra,
+        );
+    }
+
+    fn hydrate<const FROM_SERVER: bool>(
+        self,
+        cursor: &Cursor,
+        position: &PositionState,
+    ) -> Self::State {
+        self.factory.hydrate::<FROM_SERVER>(cursor, position)
+    }
+
+    fn into_owned(self) -> Self {
+        self
     }
 }
 
@@ -324,8 +482,8 @@ where
     ) where
         Self: Sized,
     {
-        let mut fut = Box::pin(self.inner);
-        match fut.as_mut().now_or_never() {
+        let mut fut = self.inner;
+        match (&mut fut).now_or_never() {
             Some(inner) => inner.to_html_async_with_buf::<OUT_OF_ORDER>(
                 buf,
                 position,
@@ -468,10 +626,11 @@ where
         //
         // in this case, though, we can simply... discover that the data are already here, and then
         // stuff them back into a new Future, which can safely be polled after its completion
-        if let Some(mut inner) = self.inner.as_mut().now_or_never() {
+        if let SuspendFuture::Ready(Some(inner)) = &mut self.inner {
             inner.dry_resolve();
-            self.inner = Box::pin(async move { inner })
-                as Pin<Box<dyn Future<Output = T> + Send>>;
+        } else if let Some(mut inner) = (&mut self.inner).now_or_never() {
+            inner.dry_resolve();
+            self.inner = SuspendFuture::Ready(Some(inner));
         }
     }
 

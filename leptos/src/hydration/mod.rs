@@ -52,6 +52,14 @@ pub fn HydrationScripts(
     /// when running in islands mode.
     #[prop(optional)]
     islands_router: bool,
+    /// In islands mode, defer startup until the integration can determine if
+    /// any hydrating subtree was rendered. Complete pages without islands omit
+    /// the bootstrap and its preloads. Streaming, ordinary hydration, and the
+    /// islands router retain their bootstrap. Leave false if WASM startup has
+    /// effects independent of islands. Requires an integration that supports
+    /// deferred hydration scripts; unsupported contexts keep the usual output.
+    #[prop(optional)]
+    when_needed: bool,
     /// A base url, not including a trailing slash
     #[prop(optional, into)]
     root: Option<String>,
@@ -153,7 +161,7 @@ pub fn HydrationScripts(
         wasm_file_name.push_str("_bg");
     }
 
-    let pkg_path = &options.site_pkg_dir;
+    let pkg_path = options.site_pkg_dir.clone();
     let nonce = crate::nonce::use_nonce();
     let script = if islands {
         if let Some(sc) = Owner::current_shared_context() {
@@ -164,27 +172,39 @@ pub fn HydrationScripts(
         include_str!("./hydration_script.js")
     };
 
+    let defer_bootstrap = when_needed && islands && !islands_router;
     let islands_router = islands_router
         .then_some(include_str!("./islands_routing.js"))
         .unwrap_or_default();
 
     let root = root.unwrap_or_default();
-    view! {
-        <link rel="modulepreload" href=format!("{root}/{pkg_path}/{js_file_name}.js") crossorigin=nonce.clone()/>
-        <link
-            rel="preload"
-            href=format!("{root}/{pkg_path}/{wasm_file_name}.wasm")
-            r#as="fetch"
-            r#type="application/wasm"
-            crossorigin=nonce
-                .as_ref()
-                .map(|n| Oco::Counted(n.as_inner().clone()))
-                .unwrap_or(Oco::Borrowed(""))
-        />
-        <script type="module" nonce=nonce>
-            {format!("{script}({root:?}, {pkg_path:?}, {js_file_name:?}, {wasm_file_name:?});{islands_router}")}
-        </script>
+    let render = move || {
+        view! {
+            <link rel="modulepreload" href=format!("{root}/{pkg_path}/{js_file_name}.js") crossorigin=nonce.clone()/>
+            <link
+                rel="preload"
+                href=format!("{root}/{pkg_path}/{wasm_file_name}.wasm")
+                r#as="fetch"
+                r#type="application/wasm"
+                crossorigin=nonce
+                    .as_ref()
+                    .map(|n| Oco::Counted(n.as_inner().clone()))
+                    .unwrap_or(Oco::Borrowed(""))
+            />
+            <script type="module" nonce=nonce>
+                {format_view!("{script}({root:?}, {pkg_path:?}, {js_file_name:?}, {wasm_file_name:?});{islands_router}")}
+            </script>
+        }
+    };
+    if defer_bootstrap {
+        if let Some(sc) = Owner::current_shared_context()
+            .filter(|sc| sc.supports_deferred_hydration_scripts())
+        {
+            sc.defer_hydration_script(Box::new(move || render().to_html()));
+            return crate::either::Either::Left(());
+        }
     }
+    crate::either::Either::Right(render())
 }
 
 /// If this is provided via context, it means that you are using the islands router and

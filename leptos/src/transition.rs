@@ -10,11 +10,10 @@ use reactive_graph::{
     effect::Effect,
     owner::{provide_context, use_context, Owner},
     signal::ArcRwSignal,
-    traits::{Get, Set, Track, With, WithUntracked},
+    traits::{Get, Set, Track, With},
     wrappers::write::SignalSetter,
 };
 use slotmap::{DefaultKey, SlotMap};
-use std::sync::Arc;
 use tachys::reactive_graph::OwnedView;
 
 /// If any [`Resource`](crate::prelude::Resource) is read in the `children` of this
@@ -116,8 +115,6 @@ where
                 }
             }
         });
-        let has_tasks =
-            Arc::new(move || !tasks.with_untracked(SlotMap::is_empty));
         if let Some(set_pending) = set_pending {
             Effect::new_isomorphic({
                 let none_pending = none_pending.clone();
@@ -129,11 +126,12 @@ where
 
         OwnedView::new(SuspenseBoundary::<true, _, _> {
             id,
-            none_pending,
+            none_pending: Some(none_pending),
+            starts_local,
+            tasks,
             fallback,
             children,
             error_boundary_parent,
-            has_tasks,
         })
     })
 }

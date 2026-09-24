@@ -67,10 +67,7 @@ use leptos::{
 use send_wrapper::SendWrapper;
 use std::{
     fmt::Debug,
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc, LazyLock,
-    },
+    sync::{Arc, LazyLock, Mutex},
 };
 use wasm_bindgen::JsCast;
 use web_sys::HtmlHeadElement;
@@ -163,13 +160,7 @@ impl Default for MetaContext {
 pub struct ServerMetaContext {
     /// Metadata associated with the `<title>` element.
     pub(crate) title: TitleContext,
-    /// Attributes for the `<html>` element.
-    pub(crate) html: Sender<String>,
-    /// Attributes for the `<body>` element.
-    pub(crate) body: Sender<String>,
-    /// Arbitrary elements to be added to the `<head>` as HTML.
-    #[allow(unused)] // used in SSR
-    pub(crate) elements: Sender<String>,
+    metadata: Arc<Mutex<Option<ServerMetadata>>>,
 }
 
 /// Allows you to access `<head>` content that was inserted via [`ServerMetaContext`].
@@ -178,30 +169,33 @@ pub struct ServerMetaContext {
 #[derive(Debug)]
 pub struct ServerMetaContextOutput {
     pub(crate) title: TitleContext,
-    html: Receiver<String>,
-    body: Receiver<String>,
-    elements: Receiver<String>,
+    metadata: Arc<Mutex<Option<ServerMetadata>>>,
+}
+
+#[derive(Default, Debug)]
+struct ServerMetadata {
+    html: String,
+    body: String,
+    elements: String,
+}
+
+impl Drop for ServerMetaContextOutput {
+    fn drop(&mut self) {
+        // Just like a disconnected channel, late writers retain no output.
+        self.metadata.lock().unwrap().take();
+    }
 }
 
 impl ServerMetaContext {
     /// Creates an empty [`ServerMetaContext`].
     pub fn new() -> (ServerMetaContext, ServerMetaContextOutput) {
         let title = TitleContext::default();
-        let (html_tx, html_rx) = channel();
-        let (body_tx, body_rx) = channel();
-        let (elements_tx, elements_rx) = channel();
+        let metadata = Arc::new(Mutex::new(Some(ServerMetadata::default())));
         let tx = ServerMetaContext {
             title: title.clone(),
-            html: html_tx,
-            body: body_tx,
-            elements: elements_tx,
+            metadata: metadata.clone(),
         };
-        let rx = ServerMetaContextOutput {
-            title,
-            html: html_rx,
-            body: body_rx,
-            elements: elements_rx,
-        };
+        let rx = ServerMetaContextOutput { title, metadata };
         (tx, rx)
     }
 }
@@ -214,18 +208,61 @@ impl ServerMetaContextOutput {
     /// included.
     pub async fn inject_meta_context(
         self,
+        stream: impl Stream<Item = String> + Send + Unpin,
+    ) -> impl Stream<Item = String> + Send {
+        self.inject_meta_context_with_completion(stream, false)
+            .await
+    }
+
+    /// Injects metadata using the integration's HTML-render completion state.
+    /// `html_complete` may only be true after all HTML components have rendered;
+    /// pending resource serialization alone does not invalidate completion.
+    #[doc(hidden)]
+    pub async fn inject_meta_context_with_completion(
+        self,
+        stream: impl Stream<Item = String> + Send + Unpin,
+        html_complete: bool,
+    ) -> impl Stream<Item = String> + Send {
+        self.inject_meta_context_with_completion_and_head(
+            stream,
+            html_complete,
+            String::new,
+        )
+        .await
+    }
+
+    /// Injects integration-owned head content after the initial HTML chunk is ready.
+    #[doc(hidden)]
+    pub async fn inject_meta_context_with_completion_and_head(
+        self,
         mut stream: impl Stream<Item = String> + Send + Unpin,
+        html_complete: bool,
+        additional_head: impl FnOnce() -> String + Send,
     ) -> impl Stream<Item = String> + Send {
         // if the first chunk consists of a synchronously-available Suspend,
         // inject_meta_context can accidentally run a tick before it, but the Suspend
         // when both are available. waiting a tick before awaiting the first chunk
         // in the Stream ensures that this always runs after that first chunk
         // see https://github.com/leptos-rs/leptos/issues/3976 for the original issue
-        leptos::task::tick().await;
+        if !html_complete {
+            leptos::task::tick().await;
+        }
 
         // wait for the first chunk of the stream, to ensure our components hve run
-        let mut first_chunk = stream.next().await.unwrap_or_default();
+        let first_chunk = stream.next().await.unwrap_or_default();
 
+        let modified_chunk =
+            self.inject_meta_context_into_html(first_chunk, additional_head);
+        futures::stream::once(async move { modified_chunk }).chain(stream)
+    }
+
+    /// Injects metadata into an already rendered document without stream adapters.
+    #[doc(hidden)]
+    pub fn inject_meta_context_into_html(
+        self,
+        first_chunk: String,
+        additional_head: impl FnOnce() -> String,
+    ) -> String {
         // create <title> tag
         let title = self.title.as_string();
         let title_len = title
@@ -234,39 +271,30 @@ impl ServerMetaContextOutput {
             .unwrap_or(0);
 
         // collect all registered meta tags
-        let meta_buf = self.elements.try_iter().collect::<String>();
+        let ServerMetadata {
+            html: html_attrs,
+            body: body_attrs,
+            elements: mut meta_buf,
+        } = self.metadata.lock().unwrap().take().unwrap_or_default();
+        meta_buf.push_str(&additional_head());
 
-        // get HTML strings for `<html>` and `<body>`
-        let html_attrs = self.html.try_iter().collect::<String>();
-        let body_attrs = self.body.try_iter().collect::<String>();
-
-        let mut modified_chunk = if title_len == 0 && meta_buf.is_empty() {
-            first_chunk
-        } else {
-            let mut buf = String::with_capacity(
-                first_chunk.len() + title_len + meta_buf.len(),
-            );
-            let head_loc = first_chunk
+        let mut modified_chunk = first_chunk;
+        if title_len != 0 || !meta_buf.is_empty() {
+            let head_loc = modified_chunk
                 .find("</head>")
                 .expect("you are using leptos_meta without a </head> tag");
-            let marker_loc = first_chunk
+            let marker_loc = modified_chunk
                 .find("<!--HEAD-->")
                 .map(|pos| pos + "<!--HEAD-->".len())
-                .unwrap_or_else(|| {
-                    first_chunk.find("</head>").unwrap_or(head_loc)
-                });
-            let (before_marker, after_marker) =
-                first_chunk.split_at_mut(marker_loc);
-            buf.push_str(before_marker);
-            buf.push_str(&meta_buf);
+                .unwrap_or_else(|| head_loc);
+            meta_buf.reserve(title_len);
             if let Some(title) = title {
-                buf.push_str("<title>");
-                buf.push_str(&title);
-                buf.push_str("</title>");
+                meta_buf.push_str("<title>");
+                meta_buf.push_str(&title);
+                meta_buf.push_str("</title>");
             }
-            buf.push_str(after_marker);
-            buf
-        };
+            modified_chunk.insert_str(marker_loc, &meta_buf);
+        }
 
         if !html_attrs.is_empty() {
             if let Some(index) = modified_chunk.find("<html") {
@@ -284,7 +312,7 @@ impl ServerMetaContextOutput {
             }
         }
 
-        futures::stream::once(async move { modified_chunk }).chain(stream)
+        modified_chunk
     }
 }
 
@@ -444,7 +472,13 @@ where
                 false,
                 vec![],
             );
-            _ = cx.elements.send(buf); // fails only if the receiver is already dropped
+            if let Some(metadata) = cx.metadata.lock().unwrap().as_mut() {
+                if metadata.elements.is_empty() {
+                    metadata.elements = buf;
+                } else {
+                    metadata.elements.push_str(&buf);
+                }
+            }
         } else {
             let msg = "tried to use a leptos_meta component without \
                        `ServerMetaContext` provided";
@@ -600,5 +634,56 @@ impl OrDefaultNonce for Option<Oco<'static, str>> {
             Some(nonce) => Some(nonce),
             None => use_nonce().map(|n| Arc::clone(n.as_inner()).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod metadata_storage_tests {
+    use super::*;
+
+    #[test]
+    fn output_drop_disconnects_writers_and_releases_pending_metadata() {
+        let (context, output) = ServerMetaContext::new();
+        context
+            .metadata
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .elements
+            .push_str("pending");
+        drop(output);
+        assert!(context.metadata.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_metadata_is_collected_once_and_closes_storage() {
+        let (context, output) = ServerMetaContext::new();
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let context = context.clone();
+                scope.spawn(move || {
+                    context
+                        .metadata
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .elements
+                        .push_str(&format!("<meta name=\"{i}\">"));
+                });
+            }
+        });
+        let html = output.inject_meta_context_into_html(
+            "<html><head></head><body></body></html>".to_owned(),
+            String::new,
+        );
+        for i in 0..8 {
+            assert_eq!(
+                html.matches(&format!("<meta name=\"{i}\">")).count(),
+                1
+            );
+        }
+        assert!(context.metadata.lock().unwrap().is_none());
     }
 }

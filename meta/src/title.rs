@@ -25,12 +25,17 @@ use std::sync::{
 /// Contains the current state of the document's `<title>`.
 #[derive(Clone, Default)]
 pub struct TitleContext {
-    id: Arc<AtomicU32>,
-    formatter_stack: Arc<RwLock<Vec<(TitleId, Formatter)>>>,
-    text_stack: Arc<RwLock<Vec<(TitleId, TextProp)>>>,
+    inner: Arc<TitleContextInner>,
+}
+
+#[derive(Default)]
+struct TitleContextInner {
+    id: AtomicU32,
+    formatter_stack: RwLock<Vec<(TitleId, Formatter)>>,
+    text_stack: RwLock<Vec<(TitleId, TextProp)>>,
     revalidate: ArcTrigger,
     #[allow(clippy::type_complexity)]
-    effect: Arc<Mutex<Option<RenderEffect<Option<Oco<'static, str>>>>>>,
+    effect: Mutex<Option<RenderEffect<Option<Oco<'static, str>>>>>,
 }
 
 impl core::fmt::Debug for TitleContext {
@@ -43,18 +48,18 @@ type TitleId = u32;
 
 impl TitleContext {
     fn next_id(&self) -> TitleId {
-        self.id.fetch_add(1, Ordering::Relaxed)
+        self.inner.id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn invalidate(&self) {
-        self.revalidate.notify();
+        self.inner.revalidate.notify();
     }
 
     fn spawn_effect(&self) {
         let this = self.clone();
-        let revalidate = self.revalidate.clone();
+        let revalidate = self.inner.revalidate.clone();
 
-        let mut effect_lock = self.effect.lock().or_poisoned();
+        let mut effect_lock = self.inner.effect.lock().or_poisoned();
         if effect_lock.is_none() {
             *effect_lock = Some(RenderEffect::new({
                 move |_| {
@@ -74,10 +79,11 @@ impl TitleContext {
         formatter: Option<Formatter>,
     ) {
         if let Some(text) = text {
-            self.text_stack.write().or_poisoned().push((id, text));
+            self.inner.text_stack.write().or_poisoned().push((id, text));
         }
         if let Some(formatter) = formatter {
-            self.formatter_stack
+            self.inner
+                .formatter_stack
                 .write()
                 .or_poisoned()
                 .push((id, formatter));
@@ -91,8 +97,9 @@ impl TitleContext {
         text: Option<TextProp>,
         formatter: Option<Formatter>,
     ) {
-        let mut text_stack = self.text_stack.write().or_poisoned();
-        let mut formatter_stack = self.formatter_stack.write().or_poisoned();
+        let mut text_stack = self.inner.text_stack.write().or_poisoned();
+        let mut formatter_stack =
+            self.inner.formatter_stack.write().or_poisoned();
         let text_pos =
             text_stack.iter().position(|(item_id, _)| *item_id == id);
         let formatter_pos = formatter_stack
@@ -132,13 +139,14 @@ impl TitleContext {
     }
 
     fn remove_id(&self, id: TitleId) -> (Option<TextProp>, Option<Formatter>) {
-        let mut text_stack = self.text_stack.write().or_poisoned();
+        let mut text_stack = self.inner.text_stack.write().or_poisoned();
         let text = text_stack
             .iter()
             .position(|(item_id, _)| *item_id == id)
             .map(|pos| text_stack.remove(pos).1);
 
-        let mut formatter_stack = self.formatter_stack.write().or_poisoned();
+        let mut formatter_stack =
+            self.inner.formatter_stack.write().or_poisoned();
         let formatter = formatter_stack
             .iter()
             .position(|(item_id, _)| *item_id == id)
@@ -152,6 +160,7 @@ impl TitleContext {
     /// Converts the title into a string that can be used as the text content of a `<title>` tag.
     pub fn as_string(&self) -> Option<Oco<'static, str>> {
         let title = self
+            .inner
             .text_stack
             .read()
             .or_poisoned()
@@ -160,7 +169,7 @@ impl TitleContext {
 
         title.map(|title| {
             if let Some(formatter) =
-                self.formatter_stack.read().or_poisoned().last()
+                self.inner.formatter_stack.read().or_poisoned().last()
             {
                 (formatter.1 .0)(title.into_owned()).into()
             } else {

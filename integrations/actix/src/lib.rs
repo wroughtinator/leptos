@@ -16,7 +16,7 @@ use actix_web::{
     web::{Data, Payload, ServiceConfig},
     *,
 };
-use futures::{stream::once, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use http::StatusCode;
 use hydration_context::SsrSharedContext;
 use leptos::{
@@ -155,6 +155,10 @@ struct ActixResponse(HttpResponse);
 
 impl ExtendResponse for ActixResponse {
     type ResponseOptions = ResponseOptions;
+
+    fn from_html(html: String) -> Self {
+        ActixResponse(HttpResponse::Ok().content_type("text/html").body(html))
+    }
 
     fn from_stream(
         stream: impl Stream<Item = String> + Send + 'static,
@@ -685,7 +689,9 @@ where
                 } else {
                     app.to_html_stream_in_order()
                 };
-                Box::pin(app.chain(chunks())) as PinnedStream<String>
+                leptos_integration_utils::Rendered::streaming(Box::pin(
+                    app.chain(chunks()),
+                ))
             })
         },
     )
@@ -725,7 +731,9 @@ where
                 } else {
                     app.to_html_stream_in_order()
                 };
-                Box::pin(app.chain(chunks())) as PinnedStream<String>
+                leptos_integration_utils::Rendered::streaming(Box::pin(
+                    app.chain(chunks()),
+                ))
             })
         },
     )
@@ -761,7 +769,7 @@ fn async_stream_builder<IV>(
     app: IV,
     chunks: BoxedFnOnce<PinnedStream<String>>,
     _supports_ooo: bool,
-) -> PinnedFuture<PinnedStream<String>>
+) -> PinnedFuture<leptos_integration_utils::Rendered>
 where
     IV: IntoView + 'static,
 {
@@ -771,9 +779,9 @@ where
         } else {
             app.to_html_stream_in_order()
         };
-        let app = app.collect::<String>().await;
+        let app = leptos_integration_utils::collect_html(app).await;
         let chunks = chunks();
-        Box::pin(once(async move { app }).chain(chunks)) as PinnedStream<String>
+        leptos_integration_utils::Rendered::complete(app, chunks)
     })
 }
 
@@ -815,7 +823,7 @@ fn handle_response<IV>(
         IV,
         BoxedFnOnce<PinnedStream<String>>,
         bool,
-    ) -> PinnedFuture<PinnedStream<String>>,
+    ) -> PinnedFuture<leptos_integration_utils::Rendered>,
 ) -> Route
 where
     IV: IntoView + 'static,
@@ -1158,7 +1166,11 @@ impl StaticRouteGenerator {
             }
 
             let html = meta_output
-                .inject_meta_context(stream)
+                .inject_meta_context_with_completion_and_head(
+                    stream.into_stream(),
+                    true,
+                    move || sc.take_deferred_hydration_scripts(true).concat(),
+                )
                 .await
                 .collect::<String>()
                 .await;

@@ -17,6 +17,7 @@
 
 /// Commonly-used traits.
 pub mod prelude {
+    pub use crate::{format_view, view::display::DisplayView};
     pub use crate::{
         html::{
             attribute::{

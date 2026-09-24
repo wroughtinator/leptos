@@ -886,3 +886,199 @@ where
             .unwrap_or_else(|_| unreachable!())
     }
 }
+
+/// A variable-length view list with inline storage for up to `N` items.
+///
+/// Larger lists automatically spill to the heap. The HTML, hydration marker,
+/// resource discovery, and browser update behavior are identical to `Vec<T>`.
+/// Choose a small inline capacity: very large element types increase stack use.
+#[derive(Clone, Debug)]
+pub struct InlineViewList<T, const N: usize>(smallvec::SmallVec<[T; N]>);
+
+impl<T, const N: usize> std::ops::Deref for InlineViewList<T, N> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+impl<T, const N: usize> std::ops::DerefMut for InlineViewList<T, N> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+impl<T, const N: usize> FromIterator<T> for InlineViewList<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+impl<T, const N: usize> IntoIterator for InlineViewList<T, N> {
+    type Item = T;
+    type IntoIter = smallvec::IntoIter<[T; N]>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+impl<T: Render, const N: usize> Render for InlineViewList<T, N> {
+    type State = VecState<T::State>;
+    fn build(self) -> Self::State {
+        self.0.into_vec().build()
+    }
+    fn rebuild(self, state: &mut Self::State) {
+        self.0.into_vec().rebuild(state);
+    }
+}
+
+impl<T, const N: usize> AddAnyAttr for InlineViewList<T, N>
+where
+    T: AddAnyAttr,
+{
+    type Output<SomeNewAttr: Attribute> =
+        InlineViewList<<T as AddAnyAttr>::Output<SomeNewAttr::Cloneable>, N>;
+
+    fn add_any_attr<NewAttr: Attribute>(
+        self,
+        attr: NewAttr,
+    ) -> Self::Output<NewAttr>
+    where
+        Self::Output<NewAttr>: RenderHtml,
+    {
+        let attr = attr.into_cloneable();
+        self.into_iter()
+            .map(|n| n.add_any_attr(attr.clone()))
+            .collect()
+    }
+}
+
+impl<T, const N: usize> RenderHtml for InlineViewList<T, N>
+where
+    T: RenderHtml,
+{
+    type AsyncOutput = InlineViewList<T::AsyncOutput, N>;
+    type Owned = InlineViewList<T::Owned, N>;
+
+    const MIN_LENGTH: usize = 0;
+
+    fn dry_resolve(&mut self) {
+        for inner in self.iter_mut() {
+            inner.dry_resolve();
+        }
+    }
+
+    async fn resolve(self) -> Self::AsyncOutput {
+        futures::future::join_all(self.into_iter().map(T::resolve))
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    fn html_len(&self) -> usize {
+        self.iter().map(|n| n.html_len()).sum::<usize>() + 3
+    }
+
+    fn to_html_with_buf(
+        self,
+        buf: &mut String,
+        position: &mut Position,
+        escape: bool,
+        mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
+    ) {
+        let mut children = self.into_iter();
+        if let Some(first) = children.next() {
+            first.to_html_with_buf(
+                buf,
+                position,
+                escape,
+                mark_branches,
+                extra_attrs.clone(),
+            );
+        }
+        for child in children {
+            child.to_html_with_buf(
+                buf,
+                position,
+                escape,
+                mark_branches,
+                // each child will have the extra attributes applied
+                extra_attrs.clone(),
+            );
+        }
+        if escape {
+            buf.push_str("<!>");
+            *position = Position::NextChild;
+        }
+    }
+
+    fn to_html_async_with_buf<const OUT_OF_ORDER: bool>(
+        self,
+        buf: &mut StreamBuilder,
+        position: &mut Position,
+        escape: bool,
+        mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
+    ) where
+        Self: Sized,
+    {
+        let mut children = self.into_iter();
+        if let Some(first) = children.next() {
+            first.to_html_async_with_buf::<OUT_OF_ORDER>(
+                buf,
+                position,
+                escape,
+                mark_branches,
+                extra_attrs.clone(),
+            );
+        }
+        for child in children {
+            child.to_html_async_with_buf::<OUT_OF_ORDER>(
+                buf,
+                position,
+                escape,
+                mark_branches,
+                extra_attrs.clone(),
+            );
+        }
+        if escape {
+            buf.push_sync("<!>");
+            *position = Position::NextChild;
+        }
+    }
+
+    fn hydrate<const FROM_SERVER: bool>(
+        self,
+        cursor: &Cursor,
+        position: &PositionState,
+    ) -> Self::State {
+        let states = self
+            .into_iter()
+            .map(|child| child.hydrate::<FROM_SERVER>(cursor, position))
+            .collect();
+
+        let marker = cursor.next_placeholder(position);
+        position.set(Position::NextChild);
+
+        VecState { states, marker }
+    }
+
+    async fn hydrate_async(
+        self,
+        cursor: &Cursor,
+        position: &PositionState,
+    ) -> Self::State {
+        let mut states = Vec::with_capacity(self.len());
+        for child in self {
+            states.push(child.hydrate_async(cursor, position).await);
+        }
+
+        let marker = cursor.next_placeholder(position);
+        position.set(Position::NextChild);
+
+        VecState { states, marker }
+    }
+
+    fn into_owned(self) -> Self::Owned {
+        self.into_iter()
+            .map(RenderHtml::into_owned)
+            .collect::<InlineViewList<_, N>>()
+    }
+}

@@ -1,9 +1,9 @@
-use crate::{handle_response_inner, PinnedStream};
+use crate::handle_response_inner;
 use axum::{
     body::Body,
     http::{Request, Response, StatusCode},
 };
-use futures::{stream::once, Future, StreamExt};
+use futures::{Future, StreamExt};
 use leptos::{config::LeptosOptions, context::provide_context, IntoView};
 use std::{
     convert::Infallible,
@@ -190,8 +190,7 @@ where
                     };
                     let app = app.collect::<String>().await;
                     let chunks = chunks();
-                    Box::pin(once(async move { app }).chain(chunks))
-                        as PinnedStream<String>
+                    leptos_integration_utils::Rendered::complete(app, chunks)
                 })
             },
         )

@@ -1,19 +1,12 @@
-//! Types that hold the set of sources or subscribers affiliated with a reactive node.
-//!
-//! At the moment, these are implemented as linear maps built on a `Vec<_>`. This is for the sake
-//! of minimizing binary size as much as possible, and on the assumption that the M:N relationship
-//! between sources and subscribers usually consists of fairly small numbers, such that the cost of
-//! a linear search is not significantly more expensive than a hash and lookup.
+//! Ordered sets of reactive graph edges. Small sets are inline; larger sets
+//! promote to a hash index while preserving subscription order.
 
+use super::small_set::SmallSet;
 use super::{AnySource, AnySubscriber, Source};
-use indexmap::IndexSet;
-use rustc_hash::FxHasher;
-use std::{hash::BuildHasherDefault, mem};
-
-type FxIndexSet<T> = IndexSet<T, BuildHasherDefault<FxHasher>>;
+use std::mem;
 
 #[derive(Default, Clone, Debug)]
-pub struct SourceSet(FxIndexSet<AnySource>);
+pub(crate) struct SourceSet(SmallSet<AnySource>);
 
 impl SourceSet {
     pub fn new() -> Self {
@@ -28,7 +21,7 @@ impl SourceSet {
         self.0.shift_remove(source);
     }
 
-    pub fn take(&mut self) -> FxIndexSet<AnySource> {
+    pub fn take(&mut self) -> SmallSet<AnySource> {
         mem::take(&mut self.0)
     }
 
@@ -45,7 +38,7 @@ impl SourceSet {
 
 impl IntoIterator for SourceSet {
     type Item = AnySource;
-    type IntoIter = <FxIndexSet<AnySource> as IntoIterator>::IntoIter;
+    type IntoIter = <SmallSet<AnySource> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -54,18 +47,18 @@ impl IntoIterator for SourceSet {
 
 impl<'a> IntoIterator for &'a SourceSet {
     type Item = &'a AnySource;
-    type IntoIter = <&'a FxIndexSet<AnySource> as IntoIterator>::IntoIter;
+    type IntoIter = <&'a SmallSet<AnySource> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        (&self.0).into_iter()
     }
 }
 #[derive(Debug, Default, Clone)]
-pub struct SubscriberSet(FxIndexSet<AnySubscriber>);
+pub(crate) struct SubscriberSet(SmallSet<AnySubscriber>);
 
 impl SubscriberSet {
     pub fn new() -> Self {
-        Self(FxIndexSet::with_capacity_and_hasher(2, Default::default()))
+        Self(SmallSet::default())
     }
 
     pub fn subscribe(&mut self, subscriber: AnySubscriber) {
@@ -83,7 +76,7 @@ impl SubscriberSet {
         self.0.shift_remove(subscriber);
     }
 
-    pub fn take(&mut self) -> FxIndexSet<AnySubscriber> {
+    pub fn take(&mut self) -> SmallSet<AnySubscriber> {
         mem::take(&mut self.0)
     }
 
@@ -94,7 +87,7 @@ impl SubscriberSet {
 
 impl IntoIterator for SubscriberSet {
     type Item = AnySubscriber;
-    type IntoIter = <FxIndexSet<AnySubscriber> as IntoIterator>::IntoIter;
+    type IntoIter = <SmallSet<AnySubscriber> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -103,9 +96,9 @@ impl IntoIterator for SubscriberSet {
 
 impl<'a> IntoIterator for &'a SubscriberSet {
     type Item = &'a AnySubscriber;
-    type IntoIter = <&'a FxIndexSet<AnySubscriber> as IntoIterator>::IntoIter;
+    type IntoIter = <&'a SmallSet<AnySubscriber> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        (&self.0).into_iter()
     }
 }

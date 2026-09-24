@@ -18,6 +18,71 @@ where
     Class { class }
 }
 
+/// Class fragments are joined with spaces directly into the SSR buffer.
+/// Wrap the array in a reactive function to update its fragments reactively.
+impl<T, const N: usize> IntoClass for [T; N]
+where
+    T: AsRef<str> + Clone + Send + 'static,
+{
+    type State = <String as IntoClass>::State;
+    type AsyncOutput = Self;
+    type Cloneable = Self;
+    type CloneableOwned = Self;
+
+    fn html_len(&self) -> usize {
+        self.iter().map(|part| part.as_ref().len()).sum::<usize>()
+            + N.saturating_sub(1)
+    }
+
+    fn to_html(self, class: &mut String) {
+        for (index, part) in self.iter().enumerate() {
+            if index > 0 {
+                class.push(' ');
+            }
+            class.push_str(part.as_ref());
+        }
+    }
+
+    fn should_overwrite(&self) -> bool {
+        true
+    }
+
+    fn hydrate<const FROM_SERVER: bool>(
+        self,
+        el: &crate::renderer::types::Element,
+    ) -> Self::State {
+        let mut value = String::with_capacity(self.html_len());
+        self.to_html(&mut value);
+        IntoClass::hydrate::<FROM_SERVER>(value, el)
+    }
+
+    fn build(self, el: &crate::renderer::types::Element) -> Self::State {
+        let mut value = String::with_capacity(self.html_len());
+        self.to_html(&mut value);
+        IntoClass::build(value, el)
+    }
+
+    fn rebuild(self, state: &mut Self::State) {
+        let mut value = String::with_capacity(self.html_len());
+        self.to_html(&mut value);
+        IntoClass::rebuild(value, state);
+    }
+
+    fn into_cloneable(self) -> Self {
+        self
+    }
+    fn into_cloneable_owned(self) -> Self::CloneableOwned {
+        self
+    }
+    fn dry_resolve(&mut self) {}
+    async fn resolve(self) -> Self {
+        self
+    }
+    fn reset(state: &mut Self::State) {
+        <String as IntoClass>::reset(state);
+    }
+}
+
 /// A CSS class.
 #[derive(Debug)]
 pub struct Class<C> {

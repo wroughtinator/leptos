@@ -25,6 +25,8 @@ paste = { workspace = true, default-features = true }
 erased = { workspace = true, default-features = true }
 wasm-bindgen = { workspace = true, default-features = true }
 html-escape = { workspace = true, default-features = true }
+memchr = "2"
+smallvec = { version = "1", features = ["const_generics"] }
 js-sys = { workspace = true, default-features = true }
 web-sys = { features = [
   "Window",

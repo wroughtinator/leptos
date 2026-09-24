@@ -15,6 +15,7 @@ use std::{
 pub mod add_attr;
 /// A typed-erased view type.
 pub mod any_view;
+pub mod display;
 /// Allows choosing between one of several views.
 pub mod either;
 /// View rendering for `Result<_, _>` types.
@@ -26,6 +27,8 @@ pub mod iterators;
 /// Keyed list iteration.
 pub mod keyed;
 mod primitives;
+/// String literals that remain allocation-free when views become owned.
+pub mod static_str;
 /// Optimized types for static strings known at compile time.
 #[cfg(all(feature = "nightly", rustc_nightly))]
 pub mod static_types;

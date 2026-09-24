@@ -47,7 +47,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, patch, post, put},
 };
-use futures::{stream::once, Future, Stream, StreamExt};
+use futures::{Future, Stream, StreamExt};
 use hydration_context::SsrSharedContext;
 use leptos::{
     config::LeptosOptions,
@@ -162,6 +162,10 @@ struct AxumResponse(Response<Body>);
 
 impl ExtendResponse for AxumResponse {
     type ResponseOptions = ResponseOptions;
+
+    fn from_html(html: String) -> Self {
+        AxumResponse(Body::from(html).into_response())
+    }
 
     fn from_stream(
         stream: impl Stream<Item = String> + Send + 'static,
@@ -795,7 +799,9 @@ where
             } else {
                 app.to_html_stream_in_order()
             };
-            Box::pin(app.chain(chunks())) as PinnedStream<String>
+            leptos_integration_utils::Rendered::streaming(Box::pin(
+                app.chain(chunks()),
+            ))
         })
     })
 }
@@ -860,7 +866,9 @@ where
             app.to_html_stream_in_order()
         };
         Box::pin(async move {
-            Box::pin(app.chain(chunks())) as PinnedStream<String>
+            leptos_integration_utils::Rendered::streaming(Box::pin(
+                app.chain(chunks()),
+            ))
         })
     })
 }
@@ -872,7 +880,7 @@ fn handle_response<IV>(
         IV,
         BoxedFnOnce<PinnedStream<String>>,
         bool,
-    ) -> PinnedFuture<PinnedStream<String>>,
+    ) -> PinnedFuture<leptos_integration_utils::Rendered>,
 ) -> impl Fn(Request<Body>) -> PinnedFuture<Response<Body>>
        + Clone
        + Send
@@ -897,7 +905,7 @@ pub fn handle_response_inner<IV>(
         IV,
         BoxedFnOnce<PinnedStream<String>>,
         bool,
-    ) -> PinnedFuture<PinnedStream<String>>,
+    ) -> PinnedFuture<leptos_integration_utils::Rendered>,
 ) -> PinnedFuture<Response<Body>>
 where
     IV: IntoView + 'static,
@@ -919,7 +927,7 @@ where
                 let path = req.uri().path_and_query().unwrap().as_str();
 
                 let full_path = format!("http://leptos.dev{path}");
-                let (_, req_parts) = generate_request_and_parts(req);
+                let (req_parts, _) = req.into_parts();
                 provide_contexts(
                     &full_path,
                     &meta_context,
@@ -1089,8 +1097,7 @@ where
             };
             let app = app.collect::<String>().await;
             let chunks = chunks();
-            Box::pin(once(async move { app }).chain(chunks))
-                as PinnedStream<String>
+            leptos_integration_utils::Rendered::complete(app, chunks)
         })
     })
 }
@@ -1154,7 +1161,7 @@ fn async_stream_builder<IV>(
     app: IV,
     chunks: BoxedFnOnce<PinnedStream<String>>,
     _supports_ooo: bool,
-) -> PinnedFuture<PinnedStream<String>>
+) -> PinnedFuture<leptos_integration_utils::Rendered>
 where
     IV: IntoView + 'static,
 {
@@ -1164,9 +1171,9 @@ where
         } else {
             app.to_html_stream_in_order()
         };
-        let app = app.collect::<String>().await;
+        let app = leptos_integration_utils::collect_html(app).await;
         let chunks = chunks();
-        Box::pin(once(async move { app }).chain(chunks)) as PinnedStream<String>
+        leptos_integration_utils::Rendered::complete(app, chunks)
     })
 }
 
@@ -1448,7 +1455,11 @@ impl StaticRouteGenerator {
             }
 
             let html = meta_output
-                .inject_meta_context(stream)
+                .inject_meta_context_with_completion_and_head(
+                    stream.into_stream(),
+                    true,
+                    move || sc.take_deferred_hydration_scripts(true).concat(),
+                )
                 .await
                 .collect::<String>()
                 .await;
@@ -2099,8 +2110,9 @@ where
                                 };
                                 let app = app.collect::<String>().await;
                                 let chunks = chunks();
-                                Box::pin(once(async move { app }).chain(chunks))
-                                    as PinnedStream<String>
+                                leptos_integration_utils::Rendered::complete(
+                                    app, chunks,
+                                )
                             })
                         },
                     )

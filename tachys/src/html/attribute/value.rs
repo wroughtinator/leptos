@@ -151,7 +151,7 @@ impl<'a> AttributeValue for &'a str {
         buf.push(' ');
         buf.push_str(key);
         buf.push_str("=\"");
-        buf.push_str(&escape_attr(self));
+        escape_attr(self, buf);
         buf.push('"');
     }
 
@@ -216,7 +216,7 @@ impl<'a> AttributeValue for Cow<'a, str> {
         buf.push(' ');
         buf.push_str(key);
         buf.push_str("=\"");
-        buf.push_str(&escape_attr(&self));
+        escape_attr(&self, buf);
         buf.push('"');
     }
 
@@ -660,8 +660,29 @@ where
     }
 }
 
-pub(crate) fn escape_attr(value: &str) -> Cow<'_, str> {
-    html_escape::encode_double_quoted_attribute(value)
+pub(crate) fn escape_attr(value: &str, buf: &mut String) {
+    // Most attributes contain long runs with nothing to escape. Search those
+    // runs using memchr's vectorized implementation, rather than branching on
+    // every byte. Keep the exact existing HTML encoding for escaped inputs.
+    if memchr::memchr3(b'&', b'<', b'>', value.as_bytes()).is_none()
+        && memchr::memchr(b'"', value.as_bytes()).is_none()
+    {
+        buf.push_str(value);
+    } else {
+        html_escape::encode_double_quoted_attribute_to_string(value, buf);
+    }
+}
+
+// Escape each formatting fragment directly into its final destination. This
+// also handles characters such as quotes without allocating an intermediate
+// String or assuming that every primitive's Display output is HTML-safe.
+struct AttributeWriter<'a>(&'a mut String);
+
+impl std::fmt::Write for AttributeWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        escape_attr(value, self.0);
+        Ok(())
+    }
 }
 
 macro_rules! render_primitive {
@@ -681,7 +702,12 @@ macro_rules! render_primitive {
             }
 
             fn to_html(self, key: &str, buf: &mut String) {
-                <String as AttributeValue>::to_html(self.to_string(), key, buf);
+                use std::fmt::Write;
+                buf.push(' ');
+                buf.push_str(key);
+                buf.push_str("=\"");
+                write!(AttributeWriter(buf), "{self}").unwrap();
+                buf.push('"');
             }
 
             fn to_template(_key: &str, _buf: &mut String) {}

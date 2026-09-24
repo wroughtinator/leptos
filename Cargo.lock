@@ -2182,6 +2182,7 @@ dependencies = [
 name = "leptos_integration_utils"
 version = "0.8.8"
 dependencies = [
+ "any_spawner",
  "futures",
  "hydration_context",
  "leptos",
@@ -2189,6 +2190,7 @@ dependencies = [
  "leptos_meta",
  "leptos_router",
  "reactive_graph",
+ "tokio",
 ]
 
 [[package]]
@@ -3914,6 +3916,7 @@ dependencies = [
  "indexmap",
  "itertools",
  "js-sys",
+ "memchr",
  "next_tuple",
  "oco_ref",
  "or_poisoned",
@@ -3928,6 +3931,7 @@ dependencies = [
  "sledgehammer_bindgen",
  "sledgehammer_utils",
  "slotmap",
+ "smallvec",
  "throw_error",
  "tokio",
  "tokio-test",

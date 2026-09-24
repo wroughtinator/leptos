@@ -56,6 +56,52 @@ impl<E: Clone, At: Clone, Ch: Clone> Clone for HtmlElement<E, At, Ch> {
 
 impl<E: Copy, At: Copy, Ch: Copy> Copy for HtmlElement<E, At, Ch> {}
 
+impl<E, At, Ch> HtmlElement<E, At, Ch> {
+    /// Extracts attributes for a compiler-generated literal factory.
+    #[doc(hidden)]
+    pub fn __take_attributes(self) -> At {
+        self.attributes
+    }
+
+    /// Installs a compiler-generated, effect-free literal attribute factory.
+    #[doc(hidden)]
+    pub fn __with_attribute_factory<F>(
+        self,
+        factory: F,
+    ) -> HtmlElement<E, super::attribute::precompiled::CompiledAttributes<F>, Ch>
+    {
+        HtmlElement {
+            #[cfg(any(debug_assertions, leptos_debuginfo))]
+            defined_at: self.defined_at,
+            tag: self.tag,
+            attributes: super::attribute::precompiled::CompiledAttributes(
+                factory,
+            ),
+            children: self.children,
+        }
+    }
+
+    /// Attaches the exact serialized representation of literal attributes.
+    /// Used by the view compiler; later attribute additions invalidate it.
+    #[doc(hidden)]
+    pub fn __precompile_attributes(
+        self,
+        html: &'static str,
+    ) -> HtmlElement<E, super::attribute::precompiled::Precompiled<At>, Ch>
+    {
+        HtmlElement {
+            #[cfg(any(debug_assertions, leptos_debuginfo))]
+            defined_at: self.defined_at,
+            tag: self.tag,
+            attributes: super::attribute::precompiled::Precompiled {
+                attributes: self.attributes,
+                html,
+            },
+            children: self.children,
+        }
+    }
+}
+
 /*impl<E, At, Ch> ElementType for HtmlElement<E, At, Ch>
 where
     E: ElementType,
@@ -471,16 +517,27 @@ where
     ) where
         Self: Sized,
     {
-        let mut buf = String::with_capacity(Self::MIN_LENGTH);
-        // opening tag
-        buf.push('<');
-        buf.push_str(self.tag.tag());
-
-        let inner_html =
-            attributes_to_html((self.attributes, extra_attributes), &mut buf);
-
-        buf.push('>');
-        buffer.push_sync(&buf);
+        // Write into the stream's current synchronous chunk. A temporary buffer
+        // here allocates for every opening tag and copies it again into the
+        // stream; reserving MIN_LENGTH also reserves space for its descendants.
+        buffer.sync_buf.push('<');
+        buffer.sync_buf.push_str(self.tag.tag());
+        let compiled = extra_attributes
+            .is_empty()
+            .then(|| self.attributes.precompiled_html())
+            .flatten();
+        let inner_html = if let Some(html) = compiled {
+            buffer.sync_buf.push_str(html);
+            String::new()
+        } else {
+            attributes_to_html_with_scratch(
+                (self.attributes, extra_attributes),
+                &mut buffer.sync_buf,
+                &mut buffer.attribute_class,
+                &mut buffer.attribute_style,
+            )
+        };
+        buffer.sync_buf.push('>');
 
         if !E::SELF_CLOSING {
             // children
@@ -498,11 +555,11 @@ where
             }
 
             // closing tag
-            let mut buf = String::with_capacity(3 + E::TAG.len());
-            buf.push_str("</");
-            buf.push_str(self.tag.tag());
-            buf.push('>');
-            buffer.push_sync(&buf);
+            buffer.with_buf(|buf| {
+                buf.push_str("</");
+                buf.push_str(self.tag.tag());
+                buf.push('>');
+            });
         }
         *position = Position::NextChild;
     }
@@ -671,6 +728,23 @@ pub fn attributes_to_html<At>(attr: At, buf: &mut String) -> String
 where
     At: Attribute,
 {
+    attributes_to_html_with_scratch(
+        attr,
+        buf,
+        &mut String::new(),
+        &mut String::new(),
+    )
+}
+
+fn attributes_to_html_with_scratch<At>(
+    attr: At,
+    buf: &mut String,
+    class: &mut String,
+    style: &mut String,
+) -> String
+where
+    At: Attribute,
+{
     // `class` and `style` are created first, and pushed later
     // this is because they can be filled by a mixture of values that include
     // either the whole value (`class="..."` or `style="..."`) and individual
@@ -680,23 +754,23 @@ where
 
     // String doesn't allocate until the first push, so this is cheap if there
     // is no class or style on an element
-    let mut class = String::new();
-    let mut style = String::new();
+    class.clear();
+    style.clear();
     let mut inner_html = String::new();
 
     // inject regular attributes, and fill class and style
-    attr.to_html(buf, &mut class, &mut style, &mut inner_html);
+    attr.to_html(buf, class, style, &mut inner_html);
 
     if !class.is_empty() {
         buf.push(' ');
         buf.push_str("class=\"");
-        buf.push_str(&escape_attr(class.trim_start().trim_end()));
+        escape_attr(class.trim_start().trim_end(), buf);
         buf.push('"');
     }
     if !style.is_empty() {
         buf.push(' ');
         buf.push_str("style=\"");
-        buf.push_str(&escape_attr(style.trim_start().trim_end()));
+        escape_attr(style.trim_start().trim_end(), buf);
         buf.push('"');
     }
 

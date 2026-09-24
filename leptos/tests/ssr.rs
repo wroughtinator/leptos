@@ -3,6 +3,27 @@ use leptos::html::HtmlElement;
 
 #[cfg(feature = "ssr")]
 #[test]
+fn literal_ownership_preserves_dynamic_and_escaped_content() {
+    use leptos::prelude::*;
+    for value in ["first < & \"", "second", ""] {
+        let render = || {
+            view! {
+                <div class="base" title="a & b" style="color: red">
+                    "literal < & "<span data-value=value>{value.to_owned()}</span>
+                    <script>"if (a < b) {}"</script>
+                </div>
+            }
+        };
+        let expected = render().to_html();
+        assert_eq!(render().into_any().to_html(), expected);
+        assert!(expected.contains("title=\"a &amp; b\""));
+        assert!(expected.contains("literal &lt; &amp; "));
+        assert!(expected.contains("<script>if (a < b) {}</script>"));
+    }
+}
+
+#[cfg(feature = "ssr")]
+#[test]
 fn simple_ssr_test() {
     use leptos::prelude::*;
 

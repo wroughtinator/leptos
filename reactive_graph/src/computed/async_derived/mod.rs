@@ -156,12 +156,26 @@ pub mod suspense {
     impl SuspenseContext {
         /// Generates a unique task ID.
         pub fn task_id(&self) -> TaskHandle {
+            SYNC_READS.with(|reads| reads.set(reads.get().wrapping_add(1)));
             let key = self.tasks.write().insert(());
             TaskHandle {
                 tasks: self.tasks.clone(),
                 key,
             }
         }
+    }
+
+    thread_local! {
+        static SYNC_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Identifies synchronous resource discovery during the current poll.
+    ///
+    /// This includes immediately completed reads, so a resource completing on
+    /// another thread cannot hide a read that previously observed missing data.
+    #[doc(hidden)]
+    pub fn synchronous_read_epoch() -> u64 {
+        SYNC_READS.with(std::cell::Cell::get)
     }
 
     /// A unique identifier that removes itself from the set of tasks when it is dropped.

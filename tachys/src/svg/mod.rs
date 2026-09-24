@@ -193,11 +193,25 @@ impl ElementType for Use {
 impl ElementWithChildren for Use {}
 
 /// An element that contains no interactivity, and whose contents can be known at compile time.
-pub struct InertElement {
-    html: Cow<'static, str>,
+pub struct InertElement<S = Cow<'static, str>> {
+    html: S,
 }
 
 impl InertElement {
+    /// Creates compiler-produced literal markup without per-view string storage.
+    #[doc(hidden)]
+    pub fn from_literal<F: Fn() -> &'static str + Clone + Send + 'static>(
+        factory: F,
+    ) -> InertElement<
+        crate::view::static_str::StaticStr<
+            crate::view::static_str::LiteralFactory<F>,
+        >,
+    > {
+        InertElement {
+            html: crate::view::static_str::literal(factory),
+        }
+    }
+
     /// Creates a new inert svg element.
     pub fn new(html: impl Into<Cow<'static, str>>) -> Self {
         Self { html: html.into() }
@@ -225,28 +239,33 @@ impl Mountable for InertElementState {
     }
 }
 
-impl Render for InertElement {
+impl<S: AsRef<str> + Into<Cow<'static, str>> + Send + 'static> Render
+    for InertElement<S>
+{
     type State = InertElementState;
 
     fn build(self) -> Self::State {
-        let el = Rndr::create_svg_element_from_html(self.html.clone());
-        InertElementState(self.html, el)
+        let html: Cow<'static, str> = self.html.into();
+        let el = Rndr::create_svg_element_from_html(html.clone());
+        InertElementState(html, el)
     }
 
     fn rebuild(self, state: &mut Self::State) {
+        let html: Cow<'static, str> = self.html.into();
         let InertElementState(prev, el) = state;
-        if &self.html != prev {
-            let mut new_el =
-                Rndr::create_svg_element_from_html(self.html.clone());
+        if &html != prev {
+            let mut new_el = Rndr::create_svg_element_from_html(html.clone());
             el.insert_before_this(&mut new_el);
             el.unmount();
             *el = new_el;
-            *prev = self.html;
+            *prev = html;
         }
     }
 }
 
-impl AddAnyAttr for InertElement {
+impl<S: AsRef<str> + Into<Cow<'static, str>> + Send + 'static> AddAnyAttr
+    for InertElement<S>
+{
     type Output<SomeNewAttr: Attribute> = Self;
 
     fn add_any_attr<NewAttr: Attribute>(
@@ -263,14 +282,16 @@ impl AddAnyAttr for InertElement {
     }
 }
 
-impl RenderHtml for InertElement {
+impl<S: AsRef<str> + Into<Cow<'static, str>> + Send + 'static> RenderHtml
+    for InertElement<S>
+{
     type AsyncOutput = Self;
     type Owned = Self;
 
     const MIN_LENGTH: usize = 0;
 
     fn html_len(&self) -> usize {
-        self.html.len()
+        self.html.as_ref().len()
     }
 
     fn dry_resolve(&mut self) {}
@@ -287,7 +308,7 @@ impl RenderHtml for InertElement {
         _mark_branches: bool,
         _extra_attrs: Vec<AnyAttribute>,
     ) {
-        buf.push_str(&self.html);
+        buf.push_str(self.html.as_ref());
         *position = Position::NextChild;
     }
 
@@ -305,7 +326,7 @@ impl RenderHtml for InertElement {
         let el = crate::renderer::types::Element::cast_from(cursor.current())
             .unwrap();
         position.set(Position::NextChild);
-        InertElementState(self.html, el)
+        InertElementState(self.html.into(), el)
     }
 
     fn into_owned(self) -> Self::Owned {

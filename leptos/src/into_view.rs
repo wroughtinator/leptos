@@ -240,6 +240,17 @@ pub trait CollectView {
 
     /// Collects the iterator into a list of views.
     fn collect_view(self) -> Vec<Self::View>;
+
+    /// Collects views with inline capacity for small lists, spilling to the heap
+    /// when needed. Rendering and browser updates retain ordinary list semantics.
+    fn collect_view_inline<const N: usize>(
+        self,
+    ) -> tachys::view::iterators::InlineViewList<Self::View, N>
+    where
+        Self: Sized + IntoIterator<Item = Self::View>,
+    {
+        self.into_iter().collect()
+    }
 }
 
 impl<It, V> CollectView for It

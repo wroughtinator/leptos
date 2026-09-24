@@ -121,27 +121,14 @@ where
         provide_context(SuspenseContext {
             tasks: tasks.clone(),
         });
-        let none_pending = ArcMemo::new({
-            let tasks = tasks.clone();
-            move |prev: Option<&bool>| {
-                tasks.track();
-                if prev.is_none() && starts_local {
-                    false
-                } else {
-                    tasks.with(SlotMap::is_empty)
-                }
-            }
-        });
-        let has_tasks =
-            Arc::new(move || !tasks.with_untracked(SlotMap::is_empty));
-
         OwnedView::new(SuspenseBoundary::<false, _, _> {
             id,
-            none_pending,
+            none_pending: None,
+            starts_local,
+            tasks,
             fallback,
             children,
             error_boundary_parent,
-            has_tasks,
         })
     })
 }
@@ -160,11 +147,33 @@ fn nonce_or_not() -> Option<Arc<str>> {
 
 pub(crate) struct SuspenseBoundary<const TRANSITION: bool, Fal, Chil> {
     pub id: SerializedDataId,
-    pub none_pending: ArcMemo<bool>,
+    pub none_pending: Option<ArcMemo<bool>>,
+    pub starts_local: bool,
+    pub tasks: ArcRwSignal<SlotMap<DefaultKey, ()>>,
     pub fallback: Fal,
     pub children: Chil,
     pub error_boundary_parent: Option<ErrorBoundarySuspendedChildren>,
-    pub has_tasks: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl<const TRANSITION: bool, Fal, Chil>
+    SuspenseBoundary<TRANSITION, Fal, Chil>
+{
+    // Rendering HTML never reads the browser's readiness memo. Construct it
+    // under the same OwnedView owner only when building/hydrating DOM state.
+    fn readiness(&self) -> ArcMemo<bool> {
+        self.none_pending.clone().unwrap_or_else(|| {
+            let tasks = self.tasks.clone();
+            let starts_local = self.starts_local;
+            ArcMemo::new(move |prev: Option<&bool>| {
+                tasks.track();
+                if prev.is_none() && starts_local {
+                    false
+                } else {
+                    tasks.with(SlotMap::is_empty)
+                }
+            })
+        })
+    }
 }
 
 impl<const TRANSITION: bool, Fal, Chil> Render
@@ -178,9 +187,9 @@ where
     >;
 
     fn build(self) -> Self::State {
+        let none_pending = self.readiness();
         let mut children = Some(self.children);
         let mut fallback = Some(self.fallback);
-        let none_pending = self.none_pending;
         let mut nth_run = 0;
         let outer_owner = Owner::new();
 
@@ -208,7 +217,7 @@ where
                 this.build()
             };
 
-            if nth_run == 1 && !(self.has_tasks)() {
+            if nth_run == 1 && self.tasks.with_untracked(SlotMap::is_empty) {
                 // if this is the first run, and there are no pending resources at this point,
                 // it means that there were no actually-async resources read while rendering the children
                 // this means that we're effectively on the settled second run: none_pending
@@ -255,18 +264,20 @@ where
         let SuspenseBoundary {
             id,
             none_pending,
+            starts_local,
+            tasks,
             fallback,
             children,
             error_boundary_parent,
-            has_tasks,
         } = self;
         SuspenseBoundary {
             id,
             none_pending,
+            starts_local,
+            tasks,
             fallback,
             children: children.add_any_attr(attr),
             error_boundary_parent,
-            has_tasks,
         }
     }
 }
@@ -322,11 +333,11 @@ where
         let owner = Owner::current().unwrap();
 
         let notify_error_boundary =
-            ArcStoredValue::new(self.error_boundary_parent.map(|children| {
+            self.error_boundary_parent.map(|children| {
                 let (tx, rx) = oneshot::channel();
                 children.write_value().push(rx);
-                tx
-            }));
+                ArcStoredValue::new(Some(tx))
+            });
 
         // we need to wait for one of two things: either
         // 1. all tasks are finished loading, or
@@ -334,10 +345,6 @@ where
 
         // first, create listener for tasks
         let tasks = suspense_context.tasks.clone();
-        let (tasks_tx, mut tasks_rx) =
-            futures::channel::oneshot::channel::<()>();
-
-        let mut tasks_tx = Some(tasks_tx);
 
         // now, create listener for local resources
         let (local_tx, mut local_rx) =
@@ -346,90 +353,138 @@ where
 
         // walk over the tree of children once to make sure that all resource loads are registered
         self.children.dry_resolve();
-        let children = Arc::new(Mutex::new(Some(self.children)));
+        // If discovery and its conditional-read check are already complete,
+        // there is nothing to subscribe to. Preserve the normal effect for
+        // pending tasks; it subscribes before reading to avoid lost wakeups.
+        let already_ready = if tasks
+            .try_read_untracked()
+            .map(|n| n.is_empty())
+            .unwrap_or(false)
+        {
+            self.children.dry_resolve();
+            tasks
+                .try_read_untracked()
+                .map(|n| n.is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let (mut tasks_tx, mut tasks_rx) = if already_ready {
+            (
+                None,
+                futures::future::Either::Left(futures::future::ready(())),
+            )
+        } else {
+            let (tx, rx) = oneshot::channel::<()>();
+            (Some(tx), futures::future::Either::Right(rx.map(|_| ())))
+        };
+        // Only the monitoring effect needs shared access to the children.
+        let (ready_children, children) = if already_ready {
+            (Some(self.children), None)
+        } else {
+            (None, Some(Arc::new(Mutex::new(Some(self.children)))))
+        };
 
         // check the set of tasks to see if it is empty, now or later
-        let eff = reactive_graph::effect::Effect::new_isomorphic({
-            let children = Arc::clone(&children);
-            let notify_error_boundary = notify_error_boundary.clone();
-            move |double_checking: Option<bool>| {
-                // Subscribe to `tasks` before reading on every run, unless the notification
-                // has already been sent via `tasks_tx`
-                //
-                // Because dependencies are dynamic, the signal<>effect set of links is cleared
-                // on every run, it's possible for a run that reads first and subscribes second to lose
-                // a notification that fires in between on another thread. It reads a non-empty task
-                // set, the last task finishes and notifies its subscribers, but this run has not
-                // subscribed yet. This run then subscribes... but the signal won't be updated again.
-                //
-                // This is the primary source of the hangs described in a few issues
-                // - https://github.com/leptos-rs/leptos/issues/4851
-                // - https://github.com/leptos-rs/leptos/issues/4673
-                // - https://github.com/leptos-rs/leptos/pull/4698
-                //
-                // It's important not to *over*-run this effect though; `dry_resolve` walks the view tree
-                // and re-runs child closures, which can have side effects (like creating new Resources, etc.)
-                //
-                // Tracking only if the notification has not already been sent should block those spurious reruns.
-                if tasks_tx.is_some() {
-                    tasks.track();
-                }
+        let eff = if already_ready {
+            if let Some(tx) = tasks_tx.take() {
+                _ = tx.send(());
+            }
+            if let Some(tx) = notify_error_boundary
+                .as_ref()
+                .and_then(|notify| notify.write_value().take())
+            {
+                _ = tx.send(());
+            }
+            None
+        } else {
+            Some(reactive_graph::effect::Effect::new_isomorphic({
+                let children = Arc::clone(children.as_ref().unwrap());
+                let notify_error_boundary = notify_error_boundary.clone();
+                move |double_checking: Option<bool>| {
+                    // Subscribe to `tasks` before reading on every run, unless the notification
+                    // has already been sent via `tasks_tx`
+                    //
+                    // Because dependencies are dynamic, the signal<>effect set of links is cleared
+                    // on every run, it's possible for a run that reads first and subscribes second to lose
+                    // a notification that fires in between on another thread. It reads a non-empty task
+                    // set, the last task finishes and notifies its subscribers, but this run has not
+                    // subscribed yet. This run then subscribes... but the signal won't be updated again.
+                    //
+                    // This is the primary source of the hangs described in a few issues
+                    // - https://github.com/leptos-rs/leptos/issues/4851
+                    // - https://github.com/leptos-rs/leptos/issues/4673
+                    // - https://github.com/leptos-rs/leptos/pull/4698
+                    //
+                    // It's important not to *over*-run this effect though; `dry_resolve` walks the view tree
+                    // and re-runs child closures, which can have side effects (like creating new Resources, etc.)
+                    //
+                    // Tracking only if the notification has not already been sent should block those spurious reruns.
+                    if tasks_tx.is_some() {
+                        tasks.track();
+                    }
 
-                let curr_tasks = tasks.try_read_untracked();
+                    let curr_tasks = tasks.try_read_untracked();
 
-                if let Some(curr_tasks) = curr_tasks {
-                    if curr_tasks.is_empty() {
-                        if double_checking == Some(true) {
-                            // we have finished loading, and checking the children again told us there are
-                            // no more pending tasks. so we can render both the children and the error boundary
+                    if let Some(curr_tasks) = curr_tasks {
+                        if curr_tasks.is_empty() {
+                            if double_checking == Some(true) {
+                                // we have finished loading, and checking the children again told us there are
+                                // no more pending tasks. so we can render both the children and the error boundary
 
-                            if let Some(tx) = tasks_tx.take() {
-                                // If the receiver has dropped, it means the ScopedFuture has already
-                                // dropped, so it doesn't matter if we manage to send this.
-                                _ = tx.send(());
-                            }
-                            if let Some(tx) =
-                                notify_error_boundary.write_value().take()
-                            {
-                                _ = tx.send(());
-                            }
-                        } else {
-                            // release the read guard on tasks, as we'll be updating it again
-                            drop(curr_tasks);
-                            // check the children for additional pending tasks
-                            // the will catch additional resource reads nested inside a conditional depending on initial resource reads
-                            if let Some(children) =
-                                children.lock().or_poisoned().as_mut()
-                            {
-                                children.dry_resolve();
-                            }
-
-                            if tasks
-                                .try_read_untracked()
-                                .map(|n| n.is_empty())
-                                .unwrap_or(false)
-                            {
-                                // there are no additional pending tasks, and we can simply return
                                 if let Some(tx) = tasks_tx.take() {
                                     // If the receiver has dropped, it means the ScopedFuture has already
                                     // dropped, so it doesn't matter if we manage to send this.
                                     _ = tx.send(());
                                 }
                                 if let Some(tx) =
-                                    notify_error_boundary.write_value().take()
+                                    notify_error_boundary.as_ref().and_then(
+                                        |notify| notify.write_value().take(),
+                                    )
                                 {
                                     _ = tx.send(());
                                 }
-                            }
+                            } else {
+                                // release the read guard on tasks, as we'll be updating it again
+                                drop(curr_tasks);
+                                // check the children for additional pending tasks
+                                // the will catch additional resource reads nested inside a conditional depending on initial resource reads
+                                if let Some(children) =
+                                    children.lock().or_poisoned().as_mut()
+                                {
+                                    children.dry_resolve();
+                                }
 
-                            // tell ourselves that we're just double-checking
-                            return true;
+                                if tasks
+                                    .try_read_untracked()
+                                    .map(|n| n.is_empty())
+                                    .unwrap_or(false)
+                                {
+                                    // there are no additional pending tasks, and we can simply return
+                                    if let Some(tx) = tasks_tx.take() {
+                                        // If the receiver has dropped, it means the ScopedFuture has already
+                                        // dropped, so it doesn't matter if we manage to send this.
+                                        _ = tx.send(());
+                                    }
+                                    if let Some(tx) = notify_error_boundary
+                                        .as_ref()
+                                        .and_then(|notify| {
+                                            notify.write_value().take()
+                                        })
+                                    {
+                                        _ = tx.send(());
+                                    }
+                                }
+
+                                // tell ourselves that we're just double-checking
+                                return true;
+                            }
                         }
                     }
+                    false
                 }
-                false
-            }
-        });
+            }))
+        };
 
         let mut fut = Box::pin(ScopedFuture::new(ErrorHookFuture::new(
             async move {
@@ -451,17 +506,17 @@ where
                         let sc = Owner::current_shared_context().expect("no shared context");
                         sc.set_incomplete_chunk(self.id);
                         if let Some(tx) =
-                            notify_error_boundary.write_value().take()
+                            notify_error_boundary.as_ref().and_then(|notify| notify.write_value().take())
                         {
                             let _ = tx.send(());
                         }
                         None
                     }
                     _ = tasks_rx => {
-                        let children = {
-                            let mut children_lock = children.lock().or_poisoned();
+                        let children = ready_children.unwrap_or_else(|| {
+                            let mut children_lock = children.as_ref().unwrap().lock().or_poisoned();
                             children_lock.take().expect("children should not be removed until we render here")
-                        };
+                        });
 
                         // if we ran this earlier, reactive reads would always be registered as None
                         // this is fine in the case where we want to use Suspend and .await on some future
@@ -477,7 +532,7 @@ where
                                 let sc = Owner::current_shared_context().expect("no shared context");
                                 sc.set_incomplete_chunk(self.id);
                                 if let Some(tx) =
-                                    notify_error_boundary.write_value().take()
+                                    notify_error_boundary.as_ref().and_then(|notify| notify.write_value().take())
                                 {
                                     let _ = tx.send(());
                                 }
@@ -485,7 +540,7 @@ where
                             }
                             children = children => {
                                 // clean up the (now useless) effect
-                                eff.dispose();
+                                if let Some(eff) = eff { eff.dispose(); }
 
                                 Some(OwnedView::new_with_owner(children, owner))
                             }
@@ -573,9 +628,9 @@ where
         let cursor = cursor.to_owned();
         let position = position.to_owned();
 
+        let none_pending = self.readiness();
         let mut children = Some(self.children);
         let mut fallback = Some(self.fallback);
-        let none_pending = self.none_pending;
         let mut nth_run = 0;
         let outer_owner = Owner::new();
 

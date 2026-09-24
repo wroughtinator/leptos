@@ -3,6 +3,7 @@
 
 mod node;
 mod sets;
+mod small_set;
 mod source;
 mod subscriber;
 

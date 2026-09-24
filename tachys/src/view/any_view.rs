@@ -33,6 +33,11 @@ use std::{future::Future, pin::Pin};
 pub struct AnyView {
     type_id: TypeId,
     value: Erased,
+    vtable: &'static AnyViewVTable,
+}
+
+// Shared per concrete view type; instances retain only data and a table pointer.
+struct AnyViewVTable {
     build: fn(Erased) -> AnyViewState,
     rebuild: fn(Erased, &mut AnyViewState),
     // The fields below are cfg-gated so they will not be included in WASM bundles if not needed.
@@ -122,8 +127,21 @@ impl Debug for AnyViewState {
 
 /// Allows converting some view into [`AnyView`].
 pub trait IntoAny {
-    /// Converts the view into a type-erased [`AnyView`].
+    /// Converts the view into a type-erased [`AnyView`], owning borrowed data.
     fn into_any(self) -> AnyView;
+
+    /// Moves a view that already outlives the request into an [`AnyView`].
+    ///
+    /// Unlike [`into_any`](Self::into_any), this does not recursively convert
+    /// attributes and children into owned types. Owned strings and static
+    /// references move unchanged. The concrete type is preserved for rebuilding;
+    /// different concrete types rebuild as different branches, as with any view.
+    fn into_any_static(self) -> AnyView
+    where
+        Self: Sized + 'static,
+    {
+        self.into_any()
+    }
 }
 
 /// A more general version of [`IntoAny`] that allows into [`AnyView`],
@@ -153,7 +171,7 @@ where
         }
         #[cfg(erase_components)]
         {
-            self.into_owned().into_any()
+            self.into_owned().into_any_static()
         }
     }
 }
@@ -199,6 +217,13 @@ where
     T: RenderHtml,
 {
     fn into_any(self) -> AnyView {
+        self.into_owned().into_any_static()
+    }
+
+    fn into_any_static(self) -> AnyView
+    where
+        Self: 'static,
+    {
         #[cfg(feature = "ssr")]
         fn dry_resolve<T: RenderHtml + 'static>(value: &mut Erased) {
             value.get_mut::<T>().dry_resolve();
@@ -350,28 +375,35 @@ where
             value.into_inner::<T>().rebuild(state);
         }
 
-        let value = self.into_owned();
+        struct Table<T>(std::marker::PhantomData<T>);
+        impl<T: RenderHtml + Send + 'static> Table<T> {
+            const TABLE: AnyViewVTable = AnyViewVTable {
+            build: build::<T>,
+            rebuild: rebuild::<T>,
+            #[cfg(feature = "ssr")]
+            resolve: resolve::<T>,
+            #[cfg(feature = "ssr")]
+            dry_resolve: dry_resolve::<T>,
+            #[cfg(feature = "ssr")]
+            // Avoid traversing the complete subtree just to estimate capacity.
+            // Dynamic output still grows its buffer normally when necessary.
+            html_len: T::MIN_LENGTH,
+            #[cfg(feature = "ssr")]
+            to_html: to_html::<T>,
+            #[cfg(feature = "ssr")]
+            to_html_async: to_html_async::<T>,
+            #[cfg(feature = "ssr")]
+            to_html_async_ooo: to_html_async_ooo::<T>,
+            #[cfg(feature = "hydrate")]
+            hydrate_from_server: hydrate_from_server::<T>,
+            #[cfg(feature = "hydrate")]
+            hydrate_async: hydrate_async::<T>,
+            };
+        }
         AnyView {
-            type_id: TypeId::of::<T::Owned>(),
-            build: build::<T::Owned>,
-            rebuild: rebuild::<T::Owned>,
-            #[cfg(feature = "ssr")]
-            resolve: resolve::<T::Owned>,
-            #[cfg(feature = "ssr")]
-            dry_resolve: dry_resolve::<T::Owned>,
-            #[cfg(feature = "ssr")]
-            html_len: value.html_len(),
-            #[cfg(feature = "ssr")]
-            to_html: to_html::<T::Owned>,
-            #[cfg(feature = "ssr")]
-            to_html_async: to_html_async::<T::Owned>,
-            #[cfg(feature = "ssr")]
-            to_html_async_ooo: to_html_async_ooo::<T::Owned>,
-            #[cfg(feature = "hydrate")]
-            hydrate_from_server: hydrate_from_server::<T::Owned>,
-            #[cfg(feature = "hydrate")]
-            hydrate_async: hydrate_async::<T::Owned>,
-            value: Erased::new(value),
+            type_id: TypeId::of::<T>(),
+            value: Erased::new(self),
+            vtable: &Table::<T>::TABLE,
         }
     }
 }
@@ -380,12 +412,12 @@ impl Render for AnyView {
     type State = AnyViewState;
 
     fn build(self) -> Self::State {
-        (self.build)(self.value)
+        (self.vtable.build)(self.value)
     }
 
     fn rebuild(self, state: &mut Self::State) {
         if self.type_id == state.type_id {
-            (self.rebuild)(self.value, state)
+            (self.vtable.rebuild)(self.value, state)
         } else {
             let mut new = self.build();
             if let Some(placeholder) = &mut state.placeholder {
@@ -425,7 +457,7 @@ impl RenderHtml for AnyView {
     fn dry_resolve(&mut self) {
         #[cfg(feature = "ssr")]
         {
-            (self.dry_resolve)(&mut self.value)
+            (self.vtable.dry_resolve)(&mut self.value)
         }
         #[cfg(not(feature = "ssr"))]
         panic!(
@@ -437,7 +469,7 @@ impl RenderHtml for AnyView {
     async fn resolve(self) -> Self::AsyncOutput {
         #[cfg(feature = "ssr")]
         {
-            (self.resolve)(self.value).await
+            (self.vtable.resolve)(self.value).await
         }
         #[cfg(not(feature = "ssr"))]
         panic!(
@@ -466,7 +498,7 @@ impl RenderHtml for AnyView {
             if mark_branches && escape {
                 buf.open_branch(&type_id);
             }
-            (self.to_html)(
+            (self.vtable.to_html)(
                 self.value,
                 buf,
                 position,
@@ -515,7 +547,7 @@ impl RenderHtml for AnyView {
             if mark_branches && escape {
                 buf.open_branch(&type_id);
             }
-            (self.to_html_async_ooo)(
+            (self.vtable.to_html_async_ooo)(
                 self.value,
                 buf,
                 position,
@@ -538,7 +570,7 @@ impl RenderHtml for AnyView {
             if mark_branches && escape {
                 buf.open_branch(&type_id);
             }
-            (self.to_html_async)(
+            (self.vtable.to_html_async)(
                 self.value,
                 buf,
                 position,
@@ -575,8 +607,9 @@ impl RenderHtml for AnyView {
         #[cfg(feature = "hydrate")]
         {
             if FROM_SERVER {
-                let state =
-                    (self.hydrate_from_server)(self.value, cursor, position);
+                let state = (self.vtable.hydrate_from_server)(
+                    self.value, cursor, position,
+                );
                 super::close_branch_marker(position);
                 state
             } else {
@@ -605,7 +638,7 @@ impl RenderHtml for AnyView {
         #[cfg(feature = "hydrate")]
         {
             let state =
-                (self.hydrate_async)(self.value, cursor, position).await;
+                (self.vtable.hydrate_async)(self.value, cursor, position).await;
             super::close_branch_marker(position);
             state
         }
@@ -623,7 +656,7 @@ impl RenderHtml for AnyView {
     fn html_len(&self) -> usize {
         #[cfg(feature = "ssr")]
         {
-            self.html_len
+            self.vtable.html_len
         }
         #[cfg(not(feature = "ssr"))]
         {

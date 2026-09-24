@@ -64,6 +64,34 @@ impl From<SerializedDataId> for ErrorId {
 
 /// Information that will be shared between the server and the client.
 pub trait SharedContext: Debug {
+    /// Enables deferred bootstrap handling in an integration that drains it.
+    #[doc(hidden)]
+    fn enable_deferred_hydration_scripts(&self) {}
+
+    /// Whether this context supports deferring optional islands bootstrap HTML.
+    #[doc(hidden)]
+    fn supports_deferred_hydration_scripts(&self) -> bool {
+        false
+    }
+
+    /// Registers request-local bootstrap rendering for the server integration.
+    #[doc(hidden)]
+    fn defer_hydration_script(
+        &self,
+        _script: Box<dyn FnOnce() -> String + Send>,
+    ) {
+    }
+
+    /// Drains bootstrap rendering after the initial HTML has rendered. Only a
+    /// complete document can prove that no hydrating subtree was encountered.
+    #[doc(hidden)]
+    fn take_deferred_hydration_scripts(
+        &self,
+        _html_complete: bool,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether the application is running in the browser.
     fn is_browser(&self) -> bool;
 

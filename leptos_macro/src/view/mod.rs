@@ -396,8 +396,10 @@ fn inert_element_to_tokens(
 
     html.finish();
 
-    quote! {
-        ::leptos::tachys::html::InertElement::new(#html)
+    if global_class.is_none() {
+        quote! { ::leptos::tachys::html::InertElement::from_literal(|| #html) }
+    } else {
+        quote! { ::leptos::tachys::html::InertElement::new(#html) }
     }
 }
 
@@ -508,8 +510,10 @@ fn inert_svg_element_to_tokens(
 
     html.finish();
 
-    quote! {
-        ::leptos::tachys::svg::InertElement::new(#html)
+    if global_class.is_none() {
+        quote! { ::leptos::tachys::svg::InertElement::from_literal(|| #html) }
+    } else {
+        quote! { ::leptos::tachys::svg::InertElement::new(#html) }
     }
 }
 
@@ -770,10 +774,62 @@ fn text_to_tokens(text: &LitStr) -> TokenStream {
             ::leptos::tachys::view::static_types::Static::<#text>
         }
     }
-    // otherwise, just use the literal string
+    // Keep the literal's static lifetime when the view is type-erased.
     else {
-        quote! { #text }
+        quote! { ::leptos::tachys::view::static_str::literal(|| #text) }
     }
+}
+
+// Compile only a conservative set of literal attributes. Dynamic values,
+// directives, properties, spreads and global classes use the ordinary path.
+fn precompiled_attributes(
+    node: &NodeElement<impl CustomNode>,
+) -> Option<String> {
+    if node.attributes().is_empty() {
+        return None;
+    }
+    let mut html = String::new();
+    let mut class = None;
+    for attr in node.attributes() {
+        let NodeAttribute::Attribute(attr) = attr else {
+            return None;
+        };
+        let key = attr.key.to_string();
+        if !matches!(key.as_str(), "class" | "id" | "title" | "role" | "href")
+            && !key.starts_with("data-")
+            && !key.starts_with("aria-")
+        {
+            return None;
+        }
+        let Some(Expr::Lit(value)) = attr.value() else {
+            return None;
+        };
+        let syn::Lit::Str(value) = &value.lit else {
+            return None;
+        };
+        let value = value.value();
+        if key == "class" {
+            class = Some(value);
+        } else {
+            html.push(' ');
+            html.push_str(&key);
+            html.push_str("=\"");
+            html_escape::encode_double_quoted_attribute_to_string(
+                &value, &mut html,
+            );
+            html.push('"');
+        }
+    }
+    if let Some(class) = class {
+        // A class attribute contributes a separator even for an empty value.
+        html.push_str(" class=\"");
+        html_escape::encode_double_quoted_attribute_to_string(
+            class.trim(),
+            &mut html,
+        );
+        html.push('"');
+    }
+    Some(html)
 }
 
 pub(crate) fn element_to_tokens(
@@ -993,6 +1049,11 @@ pub(crate) fn element_to_tokens(
             ide_helper_close_tag.save_tag_completion(close_tag)
         } */
 
+        let compiled_attributes = if global_class.is_none() {
+            precompiled_attributes(node)
+        } else {
+            None
+        };
         let attributes = node.attributes();
         let attributes = if attributes.len() == 1 {
             Some(attribute_to_tokens(
@@ -1040,12 +1101,20 @@ pub(crate) fn element_to_tokens(
 
         // attributes are placed second because this allows `inner_html`
         // to object if there are already children
-        Some(quote! {
-            #name
-            #children
-            #attributes
-            #global_class_expr
-        })
+        if let Some(html) = compiled_attributes {
+            Some(quote! {
+                #name
+                #children
+                .__with_attribute_factory(|| ((#name #attributes).__take_attributes(), #html))
+            })
+        } else {
+            Some(quote! {
+                #name
+                #children
+                #attributes
+                #global_class_expr
+            })
+        }
     }
 }
 
@@ -1677,6 +1746,22 @@ fn attribute_value(
                         if let Lit::Str(str) = &lit.lit {
                             return quote! {
                                 ::leptos::tachys::view::static_types::Static::<#str>
+                            };
+                        }
+                    }
+                    // Preserve static storage for ordinary literal attributes.
+                    // Directive/property values and inner_html have separate
+                    // conversion contracts and keep their existing path.
+                    let key = attr.key.to_string();
+                    if !key.contains(':')
+                        && !matches!(
+                            key.as_str(),
+                            "inner_html" | "node_ref" | "ref"
+                        )
+                    {
+                        if let Lit::Str(value) = &lit.lit {
+                            return quote! {
+                                ::leptos::tachys::view::static_str::literal(|| #value)
                             };
                         }
                     }

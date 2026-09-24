@@ -29,6 +29,9 @@ pub struct SsrSharedContext {
     id: AtomicUsize,
     non_hydration_id: AtomicUsize,
     is_hydrating: AtomicBool,
+    hydration_used: AtomicBool,
+    deferred_hydration_enabled: AtomicBool,
+    hydration_scripts: Mutex<Vec<Box<dyn FnOnce() -> String + Send>>>,
     sync_buf: RwLock<Vec<ResolvedData>>,
     async_buf: AsyncDataBuf,
     errors: ErrorBuf,
@@ -93,6 +96,34 @@ impl Debug for SsrSharedContext {
 }
 
 impl SharedContext for SsrSharedContext {
+    fn enable_deferred_hydration_scripts(&self) {
+        self.deferred_hydration_enabled
+            .store(true, Ordering::SeqCst);
+    }
+    fn supports_deferred_hydration_scripts(&self) -> bool {
+        self.deferred_hydration_enabled.load(Ordering::SeqCst)
+    }
+
+    fn defer_hydration_script(
+        &self,
+        script: Box<dyn FnOnce() -> String + Send>,
+    ) {
+        self.hydration_scripts.lock().or_poisoned().push(script);
+    }
+
+    fn take_deferred_hydration_scripts(
+        &self,
+        html_complete: bool,
+    ) -> Vec<String> {
+        let scripts =
+            mem::take(&mut *self.hydration_scripts.lock().or_poisoned());
+        if html_complete && !self.hydration_used.load(Ordering::SeqCst) {
+            Vec::new()
+        } else {
+            scripts.into_iter().map(|script| script()).collect()
+        }
+    }
+
     fn is_browser(&self) -> bool {
         false
     }
@@ -124,6 +155,9 @@ impl SharedContext for SsrSharedContext {
     }
 
     fn set_is_hydrating(&self, is_hydrating: bool) {
+        if is_hydrating {
+            self.hydration_used.store(true, Ordering::SeqCst);
+        }
         self.is_hydrating.store(is_hydrating, Ordering::SeqCst)
     }
 

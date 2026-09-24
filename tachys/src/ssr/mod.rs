@@ -17,6 +17,9 @@ use std::{
 #[derive(Default)]
 pub struct StreamBuilder {
     pub(crate) sync_buf: String,
+    // Reuse capacity, never rendered values, across elements in this stream.
+    pub(crate) attribute_class: String,
+    pub(crate) attribute_style: String,
     pub(crate) chunks: VecDeque<StreamChunk>,
     pending: Option<ChunkFuture>,
     pending_ooo: VecDeque<PinnedFuture<OooChunk>>,
@@ -87,7 +90,7 @@ impl StreamBuilder {
                 .push_back(StreamChunk::Sync(mem::take(&mut self.sync_buf)));
         }
         self.chunks.append(&mut other.chunks);
-        self.sync_buf.push_str(&other.sync_buf);
+        self.sync_buf = other.sync_buf;
     }
 
     /// Completes the stream.
@@ -466,7 +469,11 @@ impl Stream for StreamBuilder {
                     }
                 }
                 Some(StreamChunk::Sync(value)) => {
-                    this.sync_buf.push_str(&value);
+                    if this.sync_buf.is_empty() {
+                        this.sync_buf = value;
+                    } else {
+                        this.sync_buf.push_str(&value);
+                    }
                     loop {
                         match this.chunks.pop_front() {
                             None => break,

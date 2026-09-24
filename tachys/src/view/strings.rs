@@ -68,8 +68,11 @@ impl RenderHtml for &str {
         if self.is_empty() && escape {
             buf.push(' ');
         } else if escape {
-            let escaped = html_escape::encode_text(self);
-            buf.push_str(&escaped);
+            if memchr::memchr3(b'&', b'<', b'>', self.as_bytes()).is_none() {
+                buf.push_str(self);
+            } else {
+                html_escape::encode_text_to_string(self, buf);
+            }
         } else {
             buf.push_str(self);
         }

@@ -132,7 +132,13 @@ where
                 &mut buf,
             );
             if !buf.is_empty() {
-                _ = meta.html.send(buf);
+                if let Some(metadata) = meta.metadata.lock().unwrap().as_mut() {
+                    if metadata.html.is_empty() {
+                        metadata.html = buf;
+                    } else {
+                        metadata.html.push_str(&buf);
+                    }
+                }
             }
         }
     }
