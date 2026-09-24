@@ -379,7 +379,7 @@ impl Owner {
             o.borrow()
                 .as_ref()
                 .and_then(|o| o.upgrade())
-                .and_then(|current| current.shared_context.clone())
+                .and_then(|current| current.shared_context)
         })
     }
 
@@ -393,7 +393,7 @@ impl Owner {
             let sc = OWNER.with_borrow(|o| {
                 o.as_ref()
                     .and_then(|o| o.upgrade())
-                    .and_then(|current| current.shared_context.clone())
+                    .and_then(|current| current.shared_context)
             });
             match sc {
                 None => fun(),
@@ -419,7 +419,7 @@ impl Owner {
             let sc = OWNER.with_borrow(|o| {
                 o.as_ref()
                     .and_then(|o| o.upgrade())
-                    .and_then(|current| current.shared_context.clone())
+                    .and_then(|current| current.shared_context)
             });
             match sc {
                 None => fun(),

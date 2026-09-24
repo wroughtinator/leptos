@@ -26,7 +26,7 @@ impl Owner {
             context.downcast::<T>().ok().map(|n| *n)
         } else {
             let mut parent = inner.parent.as_ref().and_then(|p| p.upgrade());
-            while let Some(ref this_parent) = parent.clone() {
+            while let Some(this_parent) = parent {
                 let mut this_parent = this_parent.write().or_poisoned();
                 let contexts = &mut this_parent.contexts;
                 let value = contexts.remove(&ty);
@@ -54,7 +54,7 @@ impl Owner {
             context.downcast_ref::<T>()
         } else {
             let mut parent = inner.parent.as_ref().and_then(|p| p.upgrade());
-            while let Some(ref this_parent) = parent.clone() {
+            while let Some(this_parent) = parent {
                 let this_parent = this_parent.read().or_poisoned();
                 let contexts = &this_parent.contexts;
                 let value = contexts.get(&ty);
@@ -84,7 +84,7 @@ impl Owner {
             context.downcast_mut::<T>()
         } else {
             let mut parent = inner.parent.as_ref().and_then(|p| p.upgrade());
-            while let Some(ref this_parent) = parent.clone() {
+            while let Some(this_parent) = parent {
                 let mut this_parent = this_parent.write().or_poisoned();
                 let contexts = &mut this_parent.contexts;
                 let value = contexts.get_mut(&ty);
@@ -439,4 +439,34 @@ pub fn update_context<T: 'static, R>(
     cb: impl FnOnce(&mut T) -> R,
 ) -> Option<R> {
     Owner::current().and_then(|owner| owner.update_context(cb))
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    #[test]
+    fn ancestor_lookup_update_shadow_and_take_preserve_scope() {
+        let root = Owner::new();
+        root.with(|| provide_context(10u32));
+        let middle = root.child();
+        let leaf = middle.child();
+        leaf.with(|| {
+            assert_eq!(use_context::<u32>(), Some(10));
+            assert_eq!(with_context::<u32, _>(|n| *n + 1), Some(11));
+            assert_eq!(
+                update_context::<u32, _>(|n| {
+                    *n += 2;
+                    *n
+                }),
+                Some(12)
+            );
+            provide_context(99u32);
+            assert_eq!(take_context::<u32>(), Some(99));
+            assert_eq!(use_context::<u32>(), Some(12));
+            assert_eq!(take_context::<u32>(), Some(12));
+            assert_eq!(use_context::<u32>(), None);
+        });
+        root.with(|| assert_eq!(use_context::<u32>(), None));
+    }
 }

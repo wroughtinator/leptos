@@ -19,9 +19,14 @@ use std::{
 };
 use throw_error::{Error, ErrorId};
 
-type AsyncDataBuf = Arc<RwLock<Vec<(SerializedDataId, PinnedFuture<String>)>>>;
-type ErrorBuf = Arc<RwLock<Vec<(SerializedDataId, ErrorId, Error)>>>;
-type SealedErrors = Arc<RwLock<HashSet<SerializedDataId>>>;
+// These buffers have the same lifetime and are always shared together with
+// the serialization stream. Keep their independent locks in one allocation.
+#[derive(Default)]
+struct AsyncBuffers {
+    async_buf: RwLock<Vec<(SerializedDataId, PinnedFuture<String>)>>,
+    errors: RwLock<Vec<(SerializedDataId, ErrorId, Error)>>,
+    sealed_error_boundaries: RwLock<HashSet<SerializedDataId>>,
+}
 
 #[derive(Default)]
 /// The shared context that should be used on the server side.
@@ -33,9 +38,7 @@ pub struct SsrSharedContext {
     deferred_hydration_enabled: AtomicBool,
     hydration_scripts: Mutex<Vec<Box<dyn FnOnce() -> String + Send>>>,
     sync_buf: RwLock<Vec<ResolvedData>>,
-    async_buf: AsyncDataBuf,
-    errors: ErrorBuf,
-    sealed_error_boundaries: SealedErrors,
+    data: Arc<AsyncBuffers>,
     deferred: Mutex<Vec<PinnedFuture<()>>>,
     incomplete: Arc<Mutex<Vec<SerializedDataId>>>,
 }
@@ -70,7 +73,8 @@ impl SsrSharedContext {
     /// A second call would return an empty `vec![]`.
     pub async fn consume_buffers(&self) -> Vec<(SerializedDataId, String)> {
         let sync_data = mem::take(&mut *self.sync_buf.write().or_poisoned());
-        let async_data = mem::take(&mut *self.async_buf.write().or_poisoned());
+        let async_data =
+            mem::take(&mut *self.data.async_buf.write().or_poisoned());
 
         let mut all_data = Vec::new();
         for resolved in sync_data {
@@ -90,7 +94,7 @@ impl Debug for SsrSharedContext {
             .field("id", &self.id)
             .field("is_hydrating", &self.is_hydrating)
             .field("sync_buf", &self.sync_buf)
-            .field("async_buf", &self.async_buf.read().or_poisoned().len())
+            .field("async_buf", &self.data.async_buf.read().or_poisoned().len())
             .finish()
     }
 }
@@ -139,7 +143,7 @@ impl SharedContext for SsrSharedContext {
     }
 
     fn write_async(&self, id: SerializedDataId, fut: PinnedFuture<String>) {
-        self.async_buf.write().or_poisoned().push((id, fut))
+        self.data.async_buf.write().or_poisoned().push((id, fut))
     }
 
     fn read_data(&self, _id: &SerializedDataId) -> Option<String> {
@@ -162,7 +166,8 @@ impl SharedContext for SsrSharedContext {
     }
 
     fn errors(&self, boundary_id: &SerializedDataId) -> Vec<(ErrorId, Error)> {
-        self.errors
+        self.data
+            .errors
             .read()
             .or_poisoned()
             .iter()
@@ -182,7 +187,7 @@ impl SharedContext for SsrSharedContext {
         error_id: ErrorId,
         error: Error,
     ) {
-        self.errors.write().or_poisoned().push((
+        self.data.errors.write().or_poisoned().push((
             error_boundary_id,
             error_id,
             error,
@@ -190,11 +195,12 @@ impl SharedContext for SsrSharedContext {
     }
 
     fn take_errors(&self) -> Vec<(SerializedDataId, ErrorId, Error)> {
-        mem::take(&mut *self.errors.write().or_poisoned())
+        mem::take(&mut *self.data.errors.write().or_poisoned())
     }
 
     fn seal_errors(&self, boundary_id: &SerializedDataId) {
-        self.sealed_error_boundaries
+        self.data
+            .sealed_error_boundaries
             .write()
             .or_poisoned()
             .insert(boundary_id.clone());
@@ -202,10 +208,12 @@ impl SharedContext for SsrSharedContext {
 
     fn pending_data(&self) -> Option<PinnedStream<String>> {
         let sync_data = mem::take(&mut *self.sync_buf.write().or_poisoned());
-        let async_data = self.async_buf.read().or_poisoned();
+        let async_data = self.data.async_buf.read().or_poisoned();
 
         // 1) initial, synchronous setup chunk
-        let mut initial_chunk = String::new();
+        let mut initial_chunk = String::with_capacity(
+            "__RESOLVED_RESOURCES=[];__SERIALIZED_ERRORS=[];__PENDING_RESOURCES=[];__RESOURCE_RESOLVERS=[];".len(),
+        );
         // resolved synchronous resources and errors
         initial_chunk.push_str("__RESOLVED_RESOURCES=[");
         for resolved in sync_data {
@@ -215,7 +223,7 @@ impl SharedContext for SsrSharedContext {
         initial_chunk.push_str("];");
 
         initial_chunk.push_str("__SERIALIZED_ERRORS=[");
-        for error in mem::take(&mut *self.errors.write().or_poisoned()) {
+        for error in mem::take(&mut *self.data.errors.write().or_poisoned()) {
             // Debug-format first to get a valid, quoted JS string literal
             // (escaping `"`, `\`, control chars), then rewrite every remaining
             // `<` to a single-backslash `<` JS unicode escape. Escaping
@@ -243,9 +251,7 @@ impl SharedContext for SsrSharedContext {
         initial_chunk.push_str("__RESOURCE_RESOLVERS=[];");
 
         let async_data = AsyncDataStream {
-            async_buf: Arc::clone(&self.async_buf),
-            errors: Arc::clone(&self.errors),
-            sealed_error_boundaries: Arc::clone(&self.sealed_error_boundaries),
+            data: Arc::clone(&self.data),
         };
 
         let incomplete = Arc::clone(&self.incomplete);
@@ -253,7 +259,8 @@ impl SharedContext for SsrSharedContext {
         let stream = stream::once(async move { initial_chunk })
             .chain(async_data)
             .chain(once(async move {
-                let mut script = String::new();
+                let mut script =
+                    String::with_capacity("__INCOMPLETE_CHUNKS=[];".len());
                 script.push_str("__INCOMPLETE_CHUNKS=[");
                 for chunk in mem::take(&mut *incomplete.lock().or_poisoned()) {
                     _ = write!(script, "{},", chunk.0);
@@ -299,9 +306,7 @@ impl SharedContext for SsrSharedContext {
 }
 
 struct AsyncDataStream {
-    async_buf: AsyncDataBuf,
-    errors: ErrorBuf,
-    sealed_error_boundaries: SealedErrors,
+    data: Arc<AsyncBuffers>,
 }
 
 impl Stream for AsyncDataStream {
@@ -312,7 +317,7 @@ impl Stream for AsyncDataStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let mut resolved = String::new();
-        let mut async_buf = self.async_buf.write().or_poisoned();
+        let mut async_buf = self.data.async_buf.write().or_poisoned();
         let data = mem::take(&mut *async_buf);
         for (id, mut fut) in data {
             match fut.as_mut().poll(cx) {
@@ -330,8 +335,8 @@ impl Stream for AsyncDataStream {
                 }
             }
         }
-        let sealed = self.sealed_error_boundaries.read().or_poisoned();
-        for error in mem::take(&mut *self.errors.write().or_poisoned()) {
+        let sealed = self.data.sealed_error_boundaries.read().or_poisoned();
+        for error in mem::take(&mut *self.data.errors.write().or_poisoned()) {
             if !sealed.contains(&error.0) {
                 // see the initial-chunk path: Debug-format, then single-
                 // backslash-escape `<` so the JS parser decodes it back to `<`
@@ -373,6 +378,48 @@ mod tests {
     use super::*;
     use futures::{executor::block_on, StreamExt};
     use std::fmt;
+
+    #[test]
+    fn empty_serialization_keeps_exact_setup_and_final_chunks() {
+        let ctx = SsrSharedContext::new();
+        let chunks = block_on(ctx.pending_data().unwrap().collect::<Vec<_>>());
+        assert_eq!(chunks, [
+            "__RESOLVED_RESOURCES=[];__SERIALIZED_ERRORS=[];__PENDING_RESOURCES=[];__RESOURCE_RESOLVERS=[];",
+            "__INCOMPLETE_CHUNKS=[];",
+        ]);
+    }
+
+    #[test]
+    fn pending_serialization_outlives_context_and_preserves_late_state() {
+        use futures::{channel::oneshot, FutureExt};
+        let ctx = SsrSharedContext::new();
+        let (tx, rx) = oneshot::channel();
+        ctx.write_async(
+            SerializedDataId(7),
+            Box::pin(async move { rx.await.unwrap() }),
+        );
+        let mut stream = ctx.pending_data().unwrap();
+        let initial = block_on(stream.next()).unwrap();
+        assert!(initial.contains("__PENDING_RESOURCES=[7,];"));
+        ctx.register_error(
+            SerializedDataId(2),
+            ErrorId::from(3_usize),
+            Error::from(CustomError("sealed")),
+        );
+        ctx.seal_errors(&SerializedDataId(2));
+        ctx.set_incomplete_chunk(SerializedDataId(9));
+        assert!(stream.next().now_or_never().is_none());
+        drop(ctx);
+        tx.send("fresh value".to_owned()).unwrap();
+        let chunks = block_on(stream.collect::<Vec<_>>());
+        assert_eq!(
+            chunks,
+            [
+                "__RESOLVED_RESOURCES[7] = \"fresh value\";",
+                "__INCOMPLETE_CHUNKS=[9,];",
+            ]
+        );
+    }
 
     #[derive(Debug)]
     struct CustomError(&'static str);

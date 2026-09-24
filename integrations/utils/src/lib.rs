@@ -97,6 +97,7 @@ pub trait ExtendResponse: Sized {
 
     fn set_default_content_type(&mut self, content_type: &str);
 
+    /// Builds a response using the original stream-only integration callback.
     fn from_app<IV>(
         app_fn: impl FnOnce() -> IV + Send + 'static,
         meta_context: ServerMetaContextOutput,
@@ -106,7 +107,38 @@ pub trait ExtendResponse: Sized {
             IV,
             BoxedFnOnce<PinnedStream<String>>,
             bool,
-        ) -> PinnedFuture<Rendered>,
+        ) -> PinnedFuture<PinnedStream<String>>,
+        supports_ooo: bool,
+    ) -> impl Future<Output = Self> + Send
+    where
+        IV: IntoView + 'static,
+    {
+        Self::from_app_rendered(
+            app_fn,
+            meta_context,
+            additional_context,
+            res_options,
+            move |app, chunks, mode| {
+                let stream = stream_builder(app, chunks, mode);
+                Box::pin(async move { Rendered::streaming(stream.await) })
+            },
+            supports_ooo,
+        )
+    }
+
+    /// Builds a response whose renderer can report completed HTML explicitly.
+    fn from_app_rendered<IV>(
+        app_fn: impl FnOnce() -> IV + Send + 'static,
+        meta_context: ServerMetaContextOutput,
+        additional_context: impl FnOnce() + Send + 'static,
+        res_options: Self::ResponseOptions,
+        stream_builder: impl FnOnce(
+                IV,
+                BoxedFnOnce<PinnedStream<String>>,
+                bool,
+            ) -> PinnedFuture<Rendered>
+            + Send
+            + 'static,
         supports_ooo: bool,
     ) -> impl Future<Output = Self> + Send
     where
@@ -115,7 +147,7 @@ pub trait ExtendResponse: Sized {
         async move {
             let prefetches = PrefetchLazyFn::default();
 
-            let (owner, stream) = build_response(
+            let (owner, stream) = build_response_rendered(
                 app_fn,
                 additional_context,
                 stream_builder,
@@ -279,24 +311,82 @@ pub trait ExtendResponse: Sized {
     }
 }
 
+/// Builds a response using the original stream-only callback.
+/// Custom integrations retain their original hydration-script behavior.
 pub fn build_response<IV>(
     app_fn: impl FnOnce() -> IV + Send + 'static,
     additional_context: impl FnOnce() + Send + 'static,
     stream_builder: fn(
         IV,
         BoxedFnOnce<PinnedStream<String>>,
-        // this argument indicates whether a request wants to support out-of-order streaming
-        // responses
         bool,
-    ) -> PinnedFuture<Rendered>,
+    ) -> PinnedFuture<PinnedStream<String>>,
     is_islands_router_navigation: bool,
+) -> (Owner, PinnedFuture<PinnedStream<String>>)
+where
+    IV: IntoView + 'static,
+{
+    let (owner, rendered) = build_response_inner(
+        app_fn,
+        additional_context,
+        move |app, chunks, mode| {
+            let stream = stream_builder(app, chunks, mode);
+            Box::pin(async move { Rendered::streaming(stream.await) })
+        },
+        is_islands_router_navigation,
+        false,
+    );
+    (owner, Box::pin(async move { rendered.await.into_stream() }))
+}
+
+/// Builds a response with explicit renderer completion metadata.
+/// Integrations using this API must drain deferred hydration scripts when
+/// injecting head metadata, as the built-in integrations do.
+pub fn build_response_rendered<IV>(
+    app_fn: impl FnOnce() -> IV + Send + 'static,
+    additional_context: impl FnOnce() + Send + 'static,
+    stream_builder: impl FnOnce(
+            IV,
+            BoxedFnOnce<PinnedStream<String>>,
+            bool,
+        ) -> PinnedFuture<Rendered>
+        + Send
+        + 'static,
+    is_islands_router_navigation: bool,
+) -> (Owner, PinnedFuture<Rendered>)
+where
+    IV: IntoView + 'static,
+{
+    build_response_inner(
+        app_fn,
+        additional_context,
+        stream_builder,
+        is_islands_router_navigation,
+        true,
+    )
+}
+
+fn build_response_inner<IV>(
+    app_fn: impl FnOnce() -> IV + Send + 'static,
+    additional_context: impl FnOnce() + Send + 'static,
+    stream_builder: impl FnOnce(
+            IV,
+            BoxedFnOnce<PinnedStream<String>>,
+            bool,
+        ) -> PinnedFuture<Rendered>
+        + Send
+        + 'static,
+    is_islands_router_navigation: bool,
+    deferred_bootstrap: bool,
 ) -> (Owner, PinnedFuture<Rendered>)
 where
     IV: IntoView + 'static,
 {
     let shared_context = Arc::new(SsrSharedContext::new())
         as Arc<dyn SharedContext + Send + Sync>;
-    shared_context.enable_deferred_hydration_scripts();
+    if deferred_bootstrap {
+        shared_context.enable_deferred_hydration_scripts();
+    }
     let owner = Owner::new_root(Some(Arc::clone(&shared_context)));
     let stream = Box::pin(Sandboxed::new({
         let owner = owner.clone();
@@ -319,7 +409,17 @@ where
                     move || {
                         Box::pin(shared_context.pending_data().unwrap().map(
                             move |chunk| {
-                                format!("<script{nonce}>{chunk}</script>")
+                                let mut script = String::with_capacity(
+                                    "<script></script>".len()
+                                        + nonce.len()
+                                        + chunk.len(),
+                                );
+                                script.push_str("<script");
+                                script.push_str(&nonce);
+                                script.push('>');
+                                script.push_str(&chunk);
+                                script.push_str("</script>");
+                                script
                             },
                         ))
                             as Pin<Box<dyn Stream<Item = String> + Send>>
@@ -375,6 +475,38 @@ mod tests {
         fn set_default_content_type(&mut self, _: &str) {}
     }
 
+    #[tokio::test]
+    async fn original_integration_signatures_remain_usable() {
+        fn legacy(
+            _: (),
+            _: BoxedFnOnce<PinnedStream<String>>,
+            _: bool,
+        ) -> PinnedFuture<PinnedStream<String>> {
+            Box::pin(async {
+                Box::pin(once(async {
+                    "<html><head></head><body>legacy</body></html>".to_owned()
+                })) as PinnedStream<String>
+            })
+        }
+        _ = any_spawner::Executor::init_tokio();
+        let (owner, stream) = build_response::<()>(|| (), || (), legacy, false);
+        assert!(!owner
+            .shared_context()
+            .unwrap()
+            .supports_deferred_hydration_scripts());
+        assert!(collect_html(stream.await).await.contains("legacy"));
+        owner.unset_with_forced_cleanup();
+        let (_, meta) = leptos_meta::ServerMetaContext::new();
+        let response =
+            TestResponse::from_app::<()>(|| (), meta, || (), (), legacy, false)
+                .await;
+        let html = match response {
+            TestResponse::Html(html) => html,
+            TestResponse::Stream(stream) => collect_html(stream).await,
+        };
+        assert!(html.contains("legacy"));
+    }
+
     fn test_builder(
         _: (),
         _: BoxedFnOnce<PinnedStream<String>>,
@@ -424,7 +556,7 @@ mod tests {
             let tail = Arc::new(Mutex::new(pending.then_some(rx)));
             let (context, output) = leptos_meta::ServerMetaContext::new();
             let count = cleaned.clone();
-            let response = TestResponse::from_app(
+            let response = TestResponse::from_app_rendered(
                 move || {
                     on_cleanup(move || {
                         count.fetch_add(1, Ordering::SeqCst);
@@ -477,9 +609,15 @@ mod tests {
         }
         _ = any_spawner::Executor::init_tokio();
         let (_, output) = leptos_meta::ServerMetaContext::new();
-        let response =
-            TestResponse::from_app(|| (), output, || (), (), builder, false)
-                .await;
+        let response = TestResponse::from_app_rendered(
+            || (),
+            output,
+            || (),
+            (),
+            builder,
+            false,
+        )
+        .await;
         let TestResponse::Stream(stream) = response else {
             panic!("long serialization tail should retain streaming");
         };
@@ -508,7 +646,7 @@ mod tests {
         _ = any_spawner::Executor::init_tokio();
         for delay in [0, 10] {
             let (context, output) = ServerMetaContext::new();
-            let response = TestResponse::from_app(
+            let response = TestResponse::from_app_rendered(
                 move || {
                     leptos_meta::provide_meta_context();
                     let resource = Resource::new(|| (), move |_| async move {
@@ -591,7 +729,7 @@ mod tests {
             (false, 0, false, true, false, false, true),
         ] {
             let (context, output) = ServerMetaContext::new();
-            let response = TestResponse::from_app(
+            let response = TestResponse::from_app_rendered(
                 move || {
                     let options = LeptosOptions::builder().output_name("test").build();
                     view! {

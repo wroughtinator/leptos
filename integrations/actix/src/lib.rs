@@ -853,7 +853,7 @@ where
                 }
             };
 
-            let res = ActixResponse::from_app(
+            let res = ActixResponse::from_app_rendered(
                 app_fn,
                 meta_output,
                 additional_context,
@@ -1150,7 +1150,7 @@ impl StaticRouteGenerator {
             }
         };
 
-        let (owner, stream) = leptos_integration_utils::build_response(
+        let (owner, stream) = leptos_integration_utils::build_response_rendered(
             app_fn.clone(),
             additional_context,
             async_stream_builder,

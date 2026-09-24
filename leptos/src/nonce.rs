@@ -183,7 +183,17 @@ impl Nonce {
         let mut rng = rng();
         let mut bytes = [0; 16];
         rng.fill_bytes(&mut bytes);
-        Nonce(NONCE_ENGINE.encode(bytes).into())
+        // Base64 of 16 bytes needs 22 unpadded ASCII bytes. Encode on the
+        // stack, then allocate only the shared string exposed by this API.
+        let mut encoded = [0; 22];
+        let len = NONCE_ENGINE
+            .encode_slice(bytes, &mut encoded)
+            .expect("buffer fits a 128-bit nonce");
+        Nonce(
+            std::str::from_utf8(&encoded[..len])
+                .expect("base64 is ASCII")
+                .into(),
+        )
     }
 
     /// Builds a nonce from a caller-supplied value rather than generating
@@ -201,5 +211,26 @@ impl Nonce {
 impl Default for Nonce {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, feature = "nonce"))]
+mod tests {
+    #[test]
+    fn generated_nonce_retains_128_bits_and_url_safe_encoding() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let nonce = super::Nonce::new();
+        assert_eq!(nonce.len(), 22);
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(nonce.as_inner().as_ref())
+                .unwrap()
+                .len(),
+            16
+        );
+        assert!(nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        assert_eq!(super::Nonce::from_value(nonce.as_inner().clone()), nonce);
     }
 }
